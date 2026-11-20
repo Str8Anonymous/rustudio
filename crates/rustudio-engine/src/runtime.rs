@@ -8769,6 +8769,80 @@ mod tests {
     }
 
     #[test]
+    fn input_actions_follow_ui_button_presses() {
+        let rt = Runtime::new().unwrap();
+        let mut w = World::new(Document::new_place(), RunMode::Play);
+        w.side = Side::Client;
+        rt.enter(w);
+        rt.bind_globals().unwrap();
+        rt.lua.load(r#"
+            local gui = Instance.new("ScreenGui", workspace)
+            gui.Name = "TestGui"
+            local text = Instance.new("TextButton", gui)
+            text.Name = "Text"
+            local image = Instance.new("ImageButton", gui)
+            image.Name = "Image"
+            local ctx = Instance.new("InputContext", workspace)
+            ctx.Name = "TestInputContext"
+            local closed = Instance.new("InputContext", workspace)
+            closed.Name = "Closed"
+            closed.Enabled = false
+            counts = {}
+            local function action(parent, name, button, key)
+                local a = Instance.new("InputAction", parent)
+                a.Name = name
+                local b = Instance.new("InputBinding", a)
+                b.UIButton = button
+                if key then b.KeyCode = key end
+                counts[name] = { 0, 0 }
+                a.Pressed:Connect(function() counts[name][1] += 1 end)
+                a.Released:Connect(function() counts[name][2] += 1 end)
+                return a
+            end
+            action(ctx, "Open", text, Enum.KeyCode.E)
+            action(ctx, "Fire", image)
+            action(ctx, "Off", text).Enabled = false
+            action(closed, "Shut", text)
+            action(ctx, "Jump", nil, Enum.KeyCode.Space)
+            function state(name)
+                return (workspace.TestInputContext:FindFirstChild(name) or workspace.Closed:FindFirstChild(name)):GetState()
+            end
+            function input(st, device, key)
+                __rs_input_event(st, device, key, 0, 0, 0, 0, 0, device ~= "Keyboard")
+            end
+        "#).exec().unwrap();
+        rt.step(1.0 / 60.0);
+        let button = |name: &str| rt.lua.load(format!("return workspace.TestGui.{name}")).eval::<Value>().unwrap();
+        let ui = |name: &str, down: bool| domains::gui_input::ui_button(&rt.lua, button(name), down);
+        let check = |src: &str| rt.lua.load(format!("assert({src})")).exec().unwrap();
+
+        ui("Text", true);
+        check(r#"state("Open") and not state("Fire") and not state("Off") and not state("Shut") and not state("Jump")"#);
+        // The key bound with it neither presses nor lets go again.
+        check(r#"(function() input("Begin", "Keyboard", "E") input("End", "Keyboard", "E") return state("Open") end)()"#);
+        ui("Text", false);
+        check(r#"not state("Open")"#);
+        // Held while the mouse is down; let go with no MouseButton1Up (the
+        // button was hidden) when the left button comes up.
+        ui("Image", true);
+        check(r#"state("Fire") and not state("Open")"#);
+        check(r#"(function() input("End", "MouseButton1", "Unknown") return not state("Fire") end)()"#);
+        ui("Image", false);
+        // A button destroyed mid-press lets its action go.
+        ui("Image", true);
+        check(r#"state("Fire")"#);
+        rt.lua.load("workspace.TestGui.Image:Destroy()").exec().unwrap();
+        rt.step(1.0 / 60.0);
+        check(r#"not workspace.TestInputContext.Fire:GetState()"#);
+        rt.step(1.0 / 60.0);
+        check(r#"counts.Open[1] == 1 and counts.Open[2] == 1"#);
+        check(r#"counts.Fire[1] == 2 and counts.Fire[2] == 2"#);
+        check(r#"counts.Off[1] == 0 and counts.Shut[1] == 0 and counts.Jump[1] == 0"#);
+        let out = rt.leave().output;
+        assert!(out.iter().all(|(level, _)| *level != Level::Error), "{out:?}");
+    }
+
+    #[test]
     fn render_callbacks_run_before_waiting_tasks_resume() {
         let rt = Runtime::new().unwrap();
         rt.enter(World::new(Document::new_place(), RunMode::Run));
