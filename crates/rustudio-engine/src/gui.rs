@@ -773,24 +773,119 @@ struct Grad<'a> {
     rect: Rect,
     dir: egui::Vec2,
     offset: [f32; 2],
+    /// Where the colour or transparency can bend: every keypoint time, and
+    /// 0 and 1 (past them the sequence is held). Between two of these both
+    /// are linear in t, so a mesh cut along them is exact (`Grad::mesh`).
+    cuts: Vec<f32>,
 }
 
 impl Grad<'_> {
     fn new(d: &Document, g: Ref, rect: Rect) -> Grad<'_> {
         let rot = num(d, g, "Rotation", 0.0).to_radians();
+        let mut cuts = vec![0.0, 1.0];
+        if let Some(Variant::ColorSequence(s)) = d.prop(g, "Color") {
+            cuts.extend(s.keypoints.iter().map(|k| k.time));
+        }
+        if let Some(Variant::NumberSequence(s)) = d.prop(g, "Transparency") {
+            cuts.extend(s.keypoints.iter().map(|k| k.time));
+        }
+        cuts.retain(|t| (0.0..=1.0).contains(t));
+        cuts.sort_by(f32::total_cmp);
+        cuts.dedup();
         Grad {
             d,
             g,
             rect,
             dir: egui::vec2(rot.cos(), rot.sin()),
             offset: vec2(d, g, "Offset", [0.0, 0.0]),
+            cuts,
         }
     }
-    fn at(&self, p: Pos2) -> ([f32; 3], f32) {
+    /// The gradient position at p (unclamped; 0..1 across the gradient).
+    fn t(&self, p: Pos2) -> f32 {
         // Position in the unit square around the centre, minus Offset, along the direction.
         let u = (p.x - self.rect.center().x) / self.rect.width().max(1e-3) - self.offset[0];
         let v = (p.y - self.rect.center().y) / self.rect.height().max(1e-3) - self.offset[1];
-        sample_gradient(self.d, self.g, u * self.dir.x + v * self.dir.y + 0.5)
+        u * self.dir.x + v * self.dir.y + 0.5
+    }
+    fn at(&self, p: Pos2) -> ([f32; 3], f32) {
+        sample_gradient(self.d, self.g, self.t(p))
+    }
+    /// `m` (drawn in white, its vertex alpha the coverage: 0 on an
+    /// anti-aliased fringe) coloured by `col` under this gradient. Vertex
+    /// colours are interpolated linearly, so the triangles are first cut
+    /// along every line where t crosses a keypoint: a hard step (a health
+    /// bar cut by a 0.001-wide transparency step) stays a hard step instead
+    /// of blurring across the whole triangle, and a narrow peak between
+    /// two vertices isn't lost.
+    fn mesh(&self, m: Mesh, col: &dyn Fn(Pos2) -> Color32) -> Mesh {
+        let mut out = Mesh::with_texture(m.texture_id);
+        let mut pieces: Vec<Vec<Vertex>> = Vec::new();
+        let mut next: Vec<Vec<Vertex>> = Vec::new();
+        for tri in m.indices.chunks_exact(3) {
+            let (Some(a), Some(b), Some(c)) = (
+                m.vertices.get(tri[0] as usize),
+                m.vertices.get(tri[1] as usize),
+                m.vertices.get(tri[2] as usize),
+            ) else { continue };
+            pieces.clear();
+            pieces.push(vec![*a, *b, *c]);
+            for &cut in &self.cuts {
+                next.clear();
+                for poly in &pieces {
+                    let ts: Vec<f32> = poly.iter().map(|v| self.t(v.pos)).collect();
+                    if ts.iter().all(|&t| t >= cut) || ts.iter().all(|&t| t <= cut) {
+                        next.push(poly.clone());
+                        continue;
+                    }
+                    let (mut below, mut above) = (Vec::new(), Vec::new());
+                    for k in 0..poly.len() {
+                        let j = (k + 1) % poly.len();
+                        if ts[k] <= cut {
+                            below.push(poly[k]);
+                        }
+                        if ts[k] >= cut {
+                            above.push(poly[k]);
+                        }
+                        if (ts[k] < cut) != (ts[j] < cut) && ts[k] != cut && ts[j] != cut {
+                            // Interpolate from the same end whichever triangle
+                            // owns the edge, so neighbours meet without a crack.
+                            let (p, q, tp, tq) = if (poly[k].pos.x, poly[k].pos.y) <= (poly[j].pos.x, poly[j].pos.y) {
+                                (&poly[k], &poly[j], ts[k], ts[j])
+                            } else {
+                                (&poly[j], &poly[k], ts[j], ts[k])
+                            };
+                            let v = lerp_vertex(p, q, (cut - tp) / (tq - tp));
+                            below.push(v);
+                            above.push(v);
+                        }
+                    }
+                    for side in [below, above] {
+                        if side.len() >= 3 {
+                            next.push(side);
+                        }
+                    }
+                }
+                std::mem::swap(&mut pieces, &mut next);
+            }
+            for poly in &pieces {
+                let base = out.vertices.len() as u32;
+                for v in poly {
+                    let c = col(v.pos);
+                    let k = v.color.a() as f32 / 255.0;
+                    let s = |x: u8| (x as f32 * k).round() as u8;
+                    out.vertices.push(Vertex {
+                        pos: v.pos,
+                        uv: v.uv,
+                        color: Color32::from_rgba_premultiplied(s(c.r()), s(c.g()), s(c.b()), s(c.a())),
+                    });
+                }
+                for k in 1..poly.len() as u32 - 1 {
+                    out.indices.extend_from_slice(&[base, base + k, base + k + 1]);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -2564,6 +2659,63 @@ mod tests {
         assert!(img.vertices.iter().all(|v| {
             v.uv.x >= 0.2499 && v.uv.x <= 0.7501 && v.uv.y >= 0.2499 && v.uv.y <= 0.7501
         }));
+    }
+
+    /// A mesh's interpolated vertex alpha at p (the triangle holding it).
+    fn mesh_alpha_at(m: &Mesh, p: Pos2) -> Option<f32> {
+        for t in m.indices.chunks_exact(3) {
+            let [a, b, c] = [0, 1, 2].map(|i| m.vertices[t[i] as usize]);
+            let d = (b.pos.y - c.pos.y) * (a.pos.x - c.pos.x) + (c.pos.x - b.pos.x) * (a.pos.y - c.pos.y);
+            if d.abs() < 1e-9 {
+                continue;
+            }
+            let wa = ((b.pos.y - c.pos.y) * (p.x - c.pos.x) + (c.pos.x - b.pos.x) * (p.y - c.pos.y)) / d;
+            let wb = ((c.pos.y - a.pos.y) * (p.x - c.pos.x) + (a.pos.x - c.pos.x) * (p.y - c.pos.y)) / d;
+            let wc = 1.0 - wa - wb;
+            if wa >= -1e-4 && wb >= -1e-4 && wc >= -1e-4 {
+                let al = |v: Vertex| v.color.a() as f32;
+                return Some(wa * al(a) + wb * al(b) + wc * al(c));
+            }
+        }
+        None
+    }
+
+    /// A UIGradient cut (a 0.001-wide transparency step moved by Offset,
+    /// as health bars use) stays a hard edge at the cut, with or without a
+    /// UICorner, instead of fading across the triangles around it.
+    #[test]
+    fn gradient_cut_stays_hard() {
+        use rbx_dom_weak::{types::{NumberSequence, NumberSequenceKeypoint, Vector2}, InstanceBuilder};
+        let mut doc = Document::new_place();
+        let root = doc.dom.root_ref();
+        let kp = |t: f32, v: f32| NumberSequenceKeypoint::new(t, v, 0.0);
+        let g = doc.dom.insert(root, InstanceBuilder::new("UIGradient")
+            .with_property("Transparency", NumberSequence {
+                keypoints: vec![kp(0.0, 0.0), kp(0.5, 0.0), kp(0.501, 1.0), kp(1.0, 1.0)],
+            })
+            // Cut at 60% of the bar: Offset = fraction - 0.5.
+            .with_property("Offset", Vector2::new(0.1, 0.0)));
+        let rect = Rect::from_min_size(Pos2::new(0.0, 0.0), egui::vec2(200.0, 17.0));
+        let gr = Grad::new(&doc, g, rect);
+        let col = |p: Pos2| rgba([1.0, 0.0, 0.0], 1.0 - gr.at(p).1);
+        let white = |_: Pos2| Color32::WHITE;
+        let uv = Rect::from_min_max(egui::epaint::WHITE_UV, egui::epaint::WHITE_UV);
+        for (name, shape) in [
+            ("square", quad_mesh(rect, uv, egui::TextureId::default(), &white, 1)),
+            ("rounded", fill_rounded_aa_mesh(rect, 6.0, 1.0, None, egui::TextureId::default(), &white, true)),
+        ] {
+            let m = gr.mesh(shape, &col);
+            for y in [3.0, 8.5, 14.0] {
+                // The cut is at x = 120 (0.2 px wide); 1 px either side is
+                // fully drawn / fully cut.
+                let left = mesh_alpha_at(&m, Pos2::new(119.0, y)).unwrap();
+                let right = mesh_alpha_at(&m, Pos2::new(121.0, y)).unwrap();
+                assert!(left > 254.0, "{name}: {left} just left of the cut at y {y}");
+                assert!(right < 1.0, "{name}: {right} just right of the cut at y {y}");
+                let mid = mesh_alpha_at(&m, Pos2::new(60.0, y)).unwrap();
+                assert!(mid > 254.0, "{name}: {mid} inside the fill at y {y}");
+            }
+        }
     }
 
     #[test]
