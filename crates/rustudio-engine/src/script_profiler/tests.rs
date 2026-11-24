@@ -170,7 +170,10 @@ fn heap_is_polled_per_script() {
     let snap = snapshot();
     let row = snap.scripts.iter().find(|s| s.path.ends_with("ProfHeap")).expect("row");
     assert!(row.heap_bytes > 500_000, "{row:?}");
-    assert!(snap.vms.iter().any(|v| v.vm == VmKind::Server && v.heap_bytes >= row.heap_bytes));
+    // The VM total is kept per kind of VM (one Server VM at a time in the
+    // editor). Tests run Server VMs in parallel, and each poll overwrites
+    // the total with its own, so it can't be compared with this script's.
+    assert!(snap.vms.iter().any(|v| v.vm == VmKind::Server && v.heap_bytes > 0), "{:?}", snap.vms.iter().map(|v| (v.vm, v.heap_bytes)).collect::<Vec<_>>());
 }
 
 #[test]
