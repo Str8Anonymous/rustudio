@@ -649,8 +649,14 @@ fn name_of(d: &Document, r: Ref) -> String {
 
 /// Gradient colour and transparency at t (0..1) along a UIGradient.
 fn sample_gradient(d: &Document, g: Ref, t: f32) -> ([f32; 3], f32) {
+    sample_seqs(&d.prop(g, "Color"), &d.prop(g, "Transparency"), t)
+}
+
+/// Colour and transparency at t (0..1) of a UIGradient's Color and
+/// Transparency (read once by the caller).
+fn sample_seqs(color: &Option<Variant>, transparency: &Option<Variant>, t: f32) -> ([f32; 3], f32) {
     let t = t.clamp(0.0, 1.0);
-    let c = match d.prop(g, "Color") {
+    let c = match color {
         Some(Variant::ColorSequence(seq)) if !seq.keypoints.is_empty() => {
             let k = &seq.keypoints;
             let mut out = [k[0].color.r, k[0].color.g, k[0].color.b];
@@ -676,7 +682,7 @@ fn sample_gradient(d: &Document, g: Ref, t: f32) -> ([f32; 3], f32) {
         }
         _ => [1.0, 1.0, 1.0],
     };
-    let a = match d.prop(g, "Transparency") {
+    let a = match transparency {
         Some(Variant::NumberSequence(seq)) if !seq.keypoints.is_empty() => {
             let k = &seq.keypoints;
             let mut out = k[0].value;
@@ -767,9 +773,9 @@ fn recolor_galley(
 }
 
 /// A UIGradient over a rect: point → (colour, transparency).
-struct Grad<'a> {
-    d: &'a Document,
-    g: Ref,
+struct Grad {
+    color: Option<Variant>,
+    transparency: Option<Variant>,
     rect: Rect,
     dir: egui::Vec2,
     offset: [f32; 2],
@@ -779,22 +785,23 @@ struct Grad<'a> {
     cuts: Vec<f32>,
 }
 
-impl Grad<'_> {
-    fn new(d: &Document, g: Ref, rect: Rect) -> Grad<'_> {
+impl Grad {
+    fn new(d: &Document, g: Ref, rect: Rect) -> Grad {
         let rot = num(d, g, "Rotation", 0.0).to_radians();
+        let (color, transparency) = (d.prop(g, "Color"), d.prop(g, "Transparency"));
         let mut cuts = vec![0.0, 1.0];
-        if let Some(Variant::ColorSequence(s)) = d.prop(g, "Color") {
+        if let Some(Variant::ColorSequence(s)) = &color {
             cuts.extend(s.keypoints.iter().map(|k| k.time));
         }
-        if let Some(Variant::NumberSequence(s)) = d.prop(g, "Transparency") {
+        if let Some(Variant::NumberSequence(s)) = &transparency {
             cuts.extend(s.keypoints.iter().map(|k| k.time));
         }
         cuts.retain(|t| (0.0..=1.0).contains(t));
         cuts.sort_by(f32::total_cmp);
         cuts.dedup();
         Grad {
-            d,
-            g,
+            color,
+            transparency,
             rect,
             dir: egui::vec2(rot.cos(), rot.sin()),
             offset: vec2(d, g, "Offset", [0.0, 0.0]),
@@ -809,7 +816,7 @@ impl Grad<'_> {
         u * self.dir.x + v * self.dir.y + 0.5
     }
     fn at(&self, p: Pos2) -> ([f32; 3], f32) {
-        sample_gradient(self.d, self.g, self.t(p))
+        sample_seqs(&self.color, &self.transparency, self.t(p))
     }
     /// `m` (drawn in white, its vertex alpha the coverage: 0 on an
     /// anti-aliased fringe) coloured by `col` under this gradient. Vertex
@@ -820,6 +827,20 @@ impl Grad<'_> {
     /// two vertices isn't lost.
     fn mesh(&self, m: Mesh, col: &dyn Fn(Pos2) -> Color32) -> Mesh {
         let mut out = Mesh::with_texture(m.texture_id);
+        let paint = |v: &Vertex| {
+            let c = col(v.pos);
+            let k = v.color.a() as f32 / 255.0;
+            let s = |x: u8| (x as f32 * k).round() as u8;
+            Vertex {
+                pos: v.pos,
+                uv: v.uv,
+                color: Color32::from_rgba_premultiplied(s(c.r()), s(c.g()), s(c.b()), s(c.a())),
+            }
+        };
+        // Most triangles cross no cut: they keep their shared vertices,
+        // each coloured once.
+        let ts: Vec<f32> = m.vertices.iter().map(|v| self.t(v.pos)).collect();
+        let mut shared: Vec<Option<u32>> = vec![None; m.vertices.len()];
         let mut pieces: Vec<Vec<Vertex>> = Vec::new();
         let mut next: Vec<Vec<Vertex>> = Vec::new();
         for tri in m.indices.chunks_exact(3) {
@@ -828,6 +849,18 @@ impl Grad<'_> {
                 m.vertices.get(tri[1] as usize),
                 m.vertices.get(tri[2] as usize),
             ) else { continue };
+            let [ta, tb, tc] = [0, 1, 2].map(|i| ts[tri[i] as usize]);
+            let (lo, hi) = (ta.min(tb).min(tc), ta.max(tb).max(tc));
+            if !self.cuts.iter().any(|&k| k > lo && k < hi) {
+                for &i in tri {
+                    let o = *shared[i as usize].get_or_insert_with(|| {
+                        out.vertices.push(paint(&m.vertices[i as usize]));
+                        out.vertices.len() as u32 - 1
+                    });
+                    out.indices.push(o);
+                }
+                continue;
+            }
             pieces.clear();
             pieces.push(vec![*a, *b, *c]);
             for &cut in &self.cuts {
@@ -870,16 +903,7 @@ impl Grad<'_> {
             }
             for poly in &pieces {
                 let base = out.vertices.len() as u32;
-                for v in poly {
-                    let c = col(v.pos);
-                    let k = v.color.a() as f32 / 255.0;
-                    let s = |x: u8| (x as f32 * k).round() as u8;
-                    out.vertices.push(Vertex {
-                        pos: v.pos,
-                        uv: v.uv,
-                        color: Color32::from_rgba_premultiplied(s(c.r()), s(c.g()), s(c.b()), s(c.a())),
-                    });
-                }
+                out.vertices.extend(poly.iter().map(paint));
                 for k in 1..poly.len() as u32 - 1 {
                     out.indices.extend_from_slice(&[base, base + k, base + k + 1]);
                 }
