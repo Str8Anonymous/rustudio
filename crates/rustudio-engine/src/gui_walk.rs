@@ -2095,7 +2095,7 @@ impl Walk<'_, '_> {
             let mesh = match gradient {
                 Some(g) => {
                     let gr = Grad::new(d, g, rect);
-                    let f = move |p: Pos2| {
+                    let f = |p: Pos2| {
                         let (c, t) = gr.at(p);
                         rgba(
                             [
@@ -2106,14 +2106,16 @@ impl Walk<'_, '_> {
                             a * (1.0 - t),
                         )
                     };
-                    if has_corner {
+                    // The shape in white (alpha = coverage), then cut and
+                    // coloured along the gradient's keypoints.
+                    let shape = if has_corner {
                         fill_rounded_aa_mesh(
                             fill_rect,
                             fill_r,
                             fill_feather,
                             None,
                             egui::TextureId::default(),
-                            &f,
+                            &|_| Color32::WHITE,
                             true,
                         )
                     } else {
@@ -2121,10 +2123,11 @@ impl Walk<'_, '_> {
                             rect,
                             Rect::from_min_max(egui::epaint::WHITE_UV, egui::epaint::WHITE_UV),
                             egui::TextureId::default(),
-                            &f,
-                            8,
+                            &|_| Color32::WHITE,
+                            1,
                         )
-                    }
+                    };
+                    gr.mesh(shape, &f)
                 }
                 None => {
                     let c = rgba([bg[0] * tint[0], bg[1] * tint[1], bg[2] * tint[2]], a);
@@ -2588,7 +2591,7 @@ impl Walk<'_, '_> {
         let alpha = (1.0 - it) * me.alpha;
         let tint = me.tint;
         let grad = gradient.map(|g| Grad::new(d, g, rect));
-        let col = move |p: Pos2| match &grad {
+        let paint = |p: Pos2| match &grad {
             Some(g) => {
                 let (c, t) = g.at(p);
                 rgba(
@@ -2602,7 +2605,9 @@ impl Walk<'_, '_> {
             }
             None => rgba([ic[0] * tint[0], ic[1] * tint[1], ic[2] * tint[2]], alpha),
         };
-        let steps = if gradient.is_some() { 8 } else { 1 };
+        // Under a UIGradient the shapes are built in white (alpha =
+        // coverage), then cut along its keypoints and coloured (Grad::mesh).
+        let col = |p: Pos2| if grad.is_some() { Color32::WHITE } else { paint(p) };
         let mut meshes: Vec<Mesh> = Vec::new();
         // ScaleType: Stretch 0, Slice 1, Tile 2, Fit 3, Crop 4.
         let scale_type = enum_u32(d.prop(r, "ScaleType")).unwrap_or(0);
@@ -2618,7 +2623,7 @@ impl Walk<'_, '_> {
         let feather = 1.0 / self.ctx.pixels_per_point().max(1e-3);
         let quad = |dst: Rect, uv: Rect| match corner.filter(|c| *c >= 0.5) {
             Some(c) => rounded_quad_mesh(dst, uv, tex, &col, c, feather),
-            None => quad_mesh(dst, uv, tex, &col, steps),
+            None => quad_mesh(dst, uv, tex, &col, 1),
         };
         match scale_type {
             1 => {
@@ -2678,7 +2683,7 @@ impl Walk<'_, '_> {
                                 )),
                                 tex,
                                 &col,
-                                steps,
+                                1,
                             ));
                         }
                     }
@@ -2715,7 +2720,7 @@ impl Walk<'_, '_> {
                                     src.top() + (vis.bottom() - dst.top()) / tsz.y * src.height(),
                                 ),
                             );
-                            meshes.push(quad_mesh(vis, uv_of(s), tex, &col, steps));
+                            meshes.push(quad_mesh(vis, uv_of(s), tex, &col, 1));
                         }
                     }
                 }
@@ -2735,6 +2740,10 @@ impl Walk<'_, '_> {
             _ => meshes.push(quad(rect, uv_of(src))),
         }
         for m in meshes {
+            let m = match &grad {
+                Some(g) => g.mesh(m, &paint),
+                None => m,
+            };
             self.push(Shape::Mesh(m.into()), me);
         }
     }
