@@ -713,8 +713,14 @@ fn name_of(d: &Document, r: Ref) -> String {
 
 /// Gradient colour and transparency at t (0..1) along a UIGradient.
 fn sample_gradient(d: &Document, g: Ref, t: f32) -> ([f32; 3], f32) {
+    sample_seqs(&d.prop(g, "Color"), &d.prop(g, "Transparency"), t)
+}
+
+/// Colour and transparency at t (0..1) of a UIGradient's Color and
+/// Transparency (read once by the caller).
+fn sample_seqs(color: &Option<Variant>, transparency: &Option<Variant>, t: f32) -> ([f32; 3], f32) {
     let t = t.clamp(0.0, 1.0);
-    let c = match d.prop(g, "Color") {
+    let c = match color {
         Some(Variant::ColorSequence(seq)) if !seq.keypoints.is_empty() => {
             let k = &seq.keypoints;
             let mut out = [k[0].color.r, k[0].color.g, k[0].color.b];
@@ -740,7 +746,7 @@ fn sample_gradient(d: &Document, g: Ref, t: f32) -> ([f32; 3], f32) {
         }
         _ => [1.0, 1.0, 1.0],
     };
-    let a = match d.prop(g, "Transparency") {
+    let a = match transparency {
         Some(Variant::NumberSequence(seq)) if !seq.keypoints.is_empty() => {
             let k = &seq.keypoints;
             let mut out = k[0].value;
@@ -831,30 +837,167 @@ fn recolor_galley(
 }
 
 /// A UIGradient over a rect: point → (colour, transparency).
-struct Grad<'a> {
-    d: &'a Document,
-    g: Ref,
+struct Grad {
+    color: Option<Variant>,
+    transparency: Option<Variant>,
     rect: Rect,
     dir: egui::Vec2,
     offset: [f32; 2],
+    /// Where the colour or transparency can bend: every keypoint time, and
+    /// 0 and 1 (past them the sequence is held). Between two of these both
+    /// are linear in t, so a mesh cut along them is exact (`Grad::mesh`);
+    /// spans where both change are cut finer (`Grad::new`).
+    cuts: Vec<f32>,
 }
 
-impl Grad<'_> {
-    fn new(d: &Document, g: Ref, rect: Rect) -> Grad<'_> {
+impl Grad {
+    fn new(d: &Document, g: Ref, rect: Rect) -> Grad {
         let rot = num(d, g, "Rotation", 0.0).to_radians();
+        let (color, transparency) = (d.prop(g, "Color"), d.prop(g, "Transparency"));
+        let mut cuts = vec![0.0, 1.0];
+        if let Some(Variant::ColorSequence(s)) = &color {
+            cuts.extend(s.keypoints.iter().map(|k| k.time));
+        }
+        if let Some(Variant::NumberSequence(s)) = &transparency {
+            cuts.extend(s.keypoints.iter().map(|k| k.time));
+        }
+        cuts.retain(|t| (0.0..=1.0).contains(t));
+        cuts.sort_by(f32::total_cmp);
+        cuts.dedup();
+        // Where colour and transparency both change between two cuts, the
+        // premultiplied colour the GPU interpolates (their product) is
+        // quadratic in t, not linear: cut that span into n so the error,
+        // dc * da / (4 n^2), stays under one 8-bit step, but no finer than
+        // a pixel apart.
+        let dir = egui::vec2(rot.cos(), rot.sin());
+        let px_per_t = 1.0
+            / ((dir.x / rect.width().max(1e-3)).powi(2) + (dir.y / rect.height().max(1e-3)).powi(2))
+                .sqrt()
+                .max(1e-6);
+        let mut fine = Vec::with_capacity(cuts.len());
+        for w in cuts.windows(2) {
+            fine.push(w[0]);
+            let ((c0, a0), (c1, a1)) = (sample_seqs(&color, &transparency, w[0]), sample_seqs(&color, &transparency, w[1]));
+            let dc = (0..3).map(|i| (c1[i] - c0[i]).abs()).fold(0.0, f32::max);
+            let q = dc * (a1 - a0).abs();
+            let n = ((q * 255.0 / 4.0).sqrt().ceil()).min(((w[1] - w[0]) * px_per_t).ceil()).max(1.0) as usize;
+            fine.extend((1..n).map(|i| w[0] + (w[1] - w[0]) * i as f32 / n as f32));
+        }
+        fine.extend(cuts.last());
         Grad {
-            d,
-            g,
+            color,
+            transparency,
             rect,
-            dir: egui::vec2(rot.cos(), rot.sin()),
+            dir,
             offset: vec2(d, g, "Offset", [0.0, 0.0]),
+            cuts: fine,
         }
     }
-    fn at(&self, p: Pos2) -> ([f32; 3], f32) {
+    /// The gradient position at p (unclamped; 0..1 across the gradient).
+    fn t(&self, p: Pos2) -> f32 {
         // Position in the unit square around the centre, minus Offset, along the direction.
         let u = (p.x - self.rect.center().x) / self.rect.width().max(1e-3) - self.offset[0];
         let v = (p.y - self.rect.center().y) / self.rect.height().max(1e-3) - self.offset[1];
-        sample_gradient(self.d, self.g, u * self.dir.x + v * self.dir.y + 0.5)
+        u * self.dir.x + v * self.dir.y + 0.5
+    }
+    fn at(&self, p: Pos2) -> ([f32; 3], f32) {
+        sample_seqs(&self.color, &self.transparency, self.t(p))
+    }
+    /// `m` (drawn in white, its vertex alpha the coverage: 0 on an
+    /// anti-aliased fringe) coloured by `col` under this gradient. Vertex
+    /// colours are interpolated linearly, so the triangles are first cut
+    /// along every line where t crosses a keypoint: a hard step (a health
+    /// bar cut by a 0.001-wide transparency step) stays a hard step instead
+    /// of blurring across the whole triangle, and a narrow peak between
+    /// two vertices isn't lost.
+    fn mesh(&self, m: Mesh, col: &dyn Fn(Pos2) -> Color32) -> Mesh {
+        let mut out = Mesh::with_texture(m.texture_id);
+        let paint = |v: &Vertex| {
+            let c = col(v.pos);
+            let k = v.color.a() as f32 / 255.0;
+            let s = |x: u8| (x as f32 * k).round() as u8;
+            Vertex {
+                pos: v.pos,
+                uv: v.uv,
+                color: Color32::from_rgba_premultiplied(s(c.r()), s(c.g()), s(c.b()), s(c.a())),
+            }
+        };
+        // Most triangles cross no cut: they keep their shared vertices,
+        // each coloured once.
+        let ts: Vec<f32> = m.vertices.iter().map(|v| self.t(v.pos)).collect();
+        let mut shared: Vec<Option<u32>> = vec![None; m.vertices.len()];
+        let mut pieces: Vec<Vec<Vertex>> = Vec::new();
+        let mut next: Vec<Vec<Vertex>> = Vec::new();
+        for tri in m.indices.chunks_exact(3) {
+            let (Some(a), Some(b), Some(c)) = (
+                m.vertices.get(tri[0] as usize),
+                m.vertices.get(tri[1] as usize),
+                m.vertices.get(tri[2] as usize),
+            ) else { continue };
+            let [ta, tb, tc] = [0, 1, 2].map(|i| ts[tri[i] as usize]);
+            let (lo, hi) = (ta.min(tb).min(tc), ta.max(tb).max(tc));
+            // The cuts strictly inside the triangle's span (sorted).
+            let first = self.cuts.partition_point(|&k| k <= lo);
+            let inside = &self.cuts[first..self.cuts.partition_point(|&k| k < hi).max(first)];
+            if inside.is_empty() {
+                for &i in tri {
+                    let o = *shared[i as usize].get_or_insert_with(|| {
+                        out.vertices.push(paint(&m.vertices[i as usize]));
+                        out.vertices.len() as u32 - 1
+                    });
+                    out.indices.push(o);
+                }
+                continue;
+            }
+            pieces.clear();
+            pieces.push(vec![*a, *b, *c]);
+            for &cut in inside {
+                next.clear();
+                for poly in &pieces {
+                    let ts: Vec<f32> = poly.iter().map(|v| self.t(v.pos)).collect();
+                    if ts.iter().all(|&t| t >= cut) || ts.iter().all(|&t| t <= cut) {
+                        next.push(poly.clone());
+                        continue;
+                    }
+                    let (mut below, mut above) = (Vec::new(), Vec::new());
+                    for k in 0..poly.len() {
+                        let j = (k + 1) % poly.len();
+                        if ts[k] <= cut {
+                            below.push(poly[k]);
+                        }
+                        if ts[k] >= cut {
+                            above.push(poly[k]);
+                        }
+                        if (ts[k] < cut) != (ts[j] < cut) && ts[k] != cut && ts[j] != cut {
+                            // Interpolate from the same end whichever triangle
+                            // owns the edge, so neighbours meet without a crack.
+                            let (p, q, tp, tq) = if (poly[k].pos.x, poly[k].pos.y) <= (poly[j].pos.x, poly[j].pos.y) {
+                                (&poly[k], &poly[j], ts[k], ts[j])
+                            } else {
+                                (&poly[j], &poly[k], ts[j], ts[k])
+                            };
+                            let v = lerp_vertex(p, q, (cut - tp) / (tq - tp));
+                            below.push(v);
+                            above.push(v);
+                        }
+                    }
+                    for side in [below, above] {
+                        if side.len() >= 3 {
+                            next.push(side);
+                        }
+                    }
+                }
+                std::mem::swap(&mut pieces, &mut next);
+            }
+            for poly in &pieces {
+                let base = out.vertices.len() as u32;
+                out.vertices.extend(poly.iter().map(paint));
+                for k in 1..poly.len() as u32 - 1 {
+                    out.indices.extend_from_slice(&[base, base + k, base + k + 1]);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -3001,6 +3144,172 @@ mod tests {
         assert!(img.vertices.iter().all(|v| {
             v.uv.x >= 0.2499 && v.uv.x <= 0.7501 && v.uv.y >= 0.2499 && v.uv.y <= 0.7501
         }));
+    }
+
+    /// A mesh's interpolated vertex alpha at p (the triangle holding it).
+    fn mesh_alpha_at(m: &Mesh, p: Pos2) -> Option<f32> {
+        mesh_rgba_at(m, p).map(|c| c[3])
+    }
+
+    /// A mesh's interpolated (premultiplied) vertex colour at p.
+    fn mesh_rgba_at(m: &Mesh, p: Pos2) -> Option<[f32; 4]> {
+        for t in m.indices.chunks_exact(3) {
+            let [a, b, c] = [0, 1, 2].map(|i| m.vertices[t[i] as usize]);
+            let d = (b.pos.y - c.pos.y) * (a.pos.x - c.pos.x) + (c.pos.x - b.pos.x) * (a.pos.y - c.pos.y);
+            if d.abs() < 1e-9 {
+                continue;
+            }
+            let wa = ((b.pos.y - c.pos.y) * (p.x - c.pos.x) + (c.pos.x - b.pos.x) * (p.y - c.pos.y)) / d;
+            let wb = ((c.pos.y - a.pos.y) * (p.x - c.pos.x) + (a.pos.x - c.pos.x) * (p.y - c.pos.y)) / d;
+            let wc = 1.0 - wa - wb;
+            if wa >= -1e-4 && wb >= -1e-4 && wc >= -1e-4 {
+                let ch = |i: usize| {
+                    let v = |x: Vertex| x.color.to_array()[i] as f32;
+                    wa * v(a) + wb * v(b) + wc * v(c)
+                };
+                return Some([ch(0), ch(1), ch(2), ch(3)]);
+            }
+        }
+        None
+    }
+
+    /// A UIGradient cut (a 0.001-wide transparency step moved by Offset,
+    /// as health bars use) stays a hard edge at the cut, with or without a
+    /// UICorner, instead of fading across the triangles around it.
+    #[test]
+    fn gradient_cut_stays_hard() {
+        use rbx_dom_weak::{types::{NumberSequence, NumberSequenceKeypoint, Vector2}, InstanceBuilder};
+        let mut doc = Document::new_place();
+        let root = doc.dom.root_ref();
+        let kp = |t: f32, v: f32| NumberSequenceKeypoint::new(t, v, 0.0);
+        let g = doc.dom.insert(root, InstanceBuilder::new("UIGradient")
+            .with_property("Transparency", NumberSequence {
+                keypoints: vec![kp(0.0, 0.0), kp(0.5, 0.0), kp(0.501, 1.0), kp(1.0, 1.0)],
+            })
+            // Cut at 60% of the bar: Offset = fraction - 0.5.
+            .with_property("Offset", Vector2::new(0.1, 0.0)));
+        let rect = Rect::from_min_size(Pos2::new(0.0, 0.0), egui::vec2(200.0, 17.0));
+        let gr = Grad::new(&doc, g, rect);
+        let col = |p: Pos2| rgba([1.0, 0.0, 0.0], 1.0 - gr.at(p).1);
+        let white = |_: Pos2| Color32::WHITE;
+        let uv = Rect::from_min_max(egui::epaint::WHITE_UV, egui::epaint::WHITE_UV);
+        for (name, shape) in [
+            ("square", quad_mesh(rect, uv, egui::TextureId::default(), &white, 1)),
+            ("rounded", fill_rounded_aa_mesh(rect, 6.0, 1.0, None, egui::TextureId::default(), &white, true)),
+        ] {
+            let m = gr.mesh(shape, &col);
+            for y in [3.0, 8.5, 14.0] {
+                // The cut is at x = 120 (0.2 px wide); 1 px either side is
+                // fully drawn / fully cut.
+                let left = mesh_alpha_at(&m, Pos2::new(119.0, y)).unwrap();
+                let right = mesh_alpha_at(&m, Pos2::new(121.0, y)).unwrap();
+                assert!(left > 254.0, "{name}: {left} just left of the cut at y {y}");
+                assert!(right < 1.0, "{name}: {right} just right of the cut at y {y}");
+                let mid = mesh_alpha_at(&m, Pos2::new(60.0, y)).unwrap();
+                assert!(mid > 254.0, "{name}: {mid} inside the fill at y {y}");
+            }
+        }
+    }
+
+    /// A gradient that fades colour and transparency together (white to
+    /// black while fading out) is cut finer than its keypoints: its
+    /// premultiplied colour is their product, which isn't linear between
+    /// two vertices, so halfway it is a half-transparent grey, not white.
+    #[test]
+    fn gradient_colour_and_transparency_fade_together() {
+        use rbx_dom_weak::{
+            types::{Color3, ColorSequence, ColorSequenceKeypoint, NumberSequence, NumberSequenceKeypoint},
+            InstanceBuilder,
+        };
+        let mut doc = Document::new_place();
+        let root = doc.dom.root_ref();
+        let g = doc.dom.insert(root, InstanceBuilder::new("UIGradient")
+            .with_property("Color", ColorSequence {
+                keypoints: vec![
+                    ColorSequenceKeypoint::new(0.0, Color3::new(1.0, 1.0, 1.0)),
+                    ColorSequenceKeypoint::new(1.0, Color3::new(0.0, 0.0, 0.0)),
+                ],
+            })
+            .with_property("Transparency", NumberSequence {
+                keypoints: vec![NumberSequenceKeypoint::new(0.0, 0.0, 0.0), NumberSequenceKeypoint::new(1.0, 1.0, 0.0)],
+            }));
+        let rect = Rect::from_min_size(Pos2::new(0.0, 0.0), egui::vec2(200.0, 20.0));
+        let gr = Grad::new(&doc, g, rect);
+        let col = |p: Pos2| {
+            let (c, t) = gr.at(p);
+            rgba(c, 1.0 - t)
+        };
+        let white = |_: Pos2| Color32::WHITE;
+        let uv = Rect::from_min_max(egui::epaint::WHITE_UV, egui::epaint::WHITE_UV);
+        let m = gr.mesh(quad_mesh(rect, uv, egui::TextureId::default(), &white, 1), &col);
+        for x in [25.0, 50.0, 100.0, 150.0] {
+            let p = Pos2::new(x, 10.0);
+            let want = col(p);
+            let got = mesh_rgba_at(&m, p).unwrap();
+            for (i, w) in want.to_array().iter().enumerate() {
+                assert!((got[i] - *w as f32).abs() <= 2.0, "at x {x}: {got:?}, want {want:?}");
+            }
+        }
+    }
+
+    /// Cut gradient meshes match the gradient everywhere inside the shape,
+    /// for rotated gradients, Offset, many colour keypoints and a
+    /// transparency sequence of its own, square or rounded.
+    #[test]
+    fn gradient_mesh_matches_gradient() {
+        use rbx_dom_weak::{
+            types::{Color3, ColorSequence, ColorSequenceKeypoint, NumberSequence, NumberSequenceKeypoint, Vector2},
+            InstanceBuilder,
+        };
+        let colours: Vec<_> = (0..=12)
+            .map(|i| {
+                let f = i as f32 / 12.0;
+                ColorSequenceKeypoint::new(f, Color3::new((f * 7.0).sin().abs(), 1.0 - f, (i % 2) as f32))
+            })
+            .collect();
+        let tr = NumberSequence {
+            keypoints: vec![
+                NumberSequenceKeypoint::new(0.0, 0.0, 0.0),
+                NumberSequenceKeypoint::new(0.3, 0.6, 0.0),
+                NumberSequenceKeypoint::new(1.0, 0.2, 0.0),
+            ],
+        };
+        let rect = Rect::from_min_size(Pos2::new(10.0, 20.0), egui::vec2(160.0, 48.0));
+        let white = |_: Pos2| Color32::WHITE;
+        let uv = Rect::from_min_max(egui::epaint::WHITE_UV, egui::epaint::WHITE_UV);
+        for rot in [0.0f32, 45.0, 90.0, 200.0] {
+            let mut doc = Document::new_place();
+            let root = doc.dom.root_ref();
+            let g = doc.dom.insert(root, InstanceBuilder::new("UIGradient")
+                .with_property("Color", ColorSequence { keypoints: colours.clone() })
+                .with_property("Transparency", tr.clone())
+                .with_property("Rotation", rot)
+                .with_property("Offset", Vector2::new(0.15, -0.1)));
+            let gr = Grad::new(&doc, g, rect);
+            let col = |p: Pos2| {
+                let (c, t) = gr.at(p);
+                rgba(c, 1.0 - t)
+            };
+            for (name, shape) in [
+                ("square", quad_mesh(rect, uv, egui::TextureId::default(), &white, 1)),
+                ("rounded", fill_rounded_aa_mesh(rect, 8.0, 1.0, None, egui::TextureId::default(), &white, true)),
+            ] {
+                let m = gr.mesh(shape, &col);
+                for i in 0..20 {
+                    for j in 0..6 {
+                        let p = Pos2::new(rect.left() + 12.0 + i as f32 * 7.0, rect.top() + 6.0 + j as f32 * 7.0);
+                        let want = col(p).to_array();
+                        let got = mesh_rgba_at(&m, p).unwrap();
+                        for k in 0..4 {
+                            assert!(
+                                (got[k] - want[k] as f32).abs() <= 3.0,
+                                "{name} rot {rot} at {p:?}: {got:?}, want {want:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
