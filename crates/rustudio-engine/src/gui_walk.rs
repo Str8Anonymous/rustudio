@@ -3750,7 +3750,7 @@ mod layout_tests {
 
     /// A TextScaled label whose new size misses the frame's text budget (a
     /// press's UIScale dip on a slow machine) draws its last text, not
-    /// nothing, and is walked again next frame (the Rogue-Like hub's tabs
+    /// nothing, and is walked again next frame (a menu's tab buttons
     /// went blank on click).
     #[test]
     fn deferred_scaled_text_keeps_its_last_text() {
