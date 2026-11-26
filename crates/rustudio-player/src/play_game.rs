@@ -289,6 +289,9 @@ pub fn fire_gui_events(rt: &Runtime, events: Vec<rustudio_engine::gui::GuiEvent>
                     })
                     .collect();
                 rt.fire(r, name, vals);
+                if matches!(name, "MouseButton1Down" | "MouseButton1Up") {
+                    rustudio_engine::runtime::domains::gui_input::ui_button(lua, rt.inst(r), name == "MouseButton1Down");
+                }
                 // UserInputService.TextBoxFocused / TextBoxFocusReleased(textBox)
                 // go with a TextBox's Focused / FocusLost.
                 let uis_ev = match name {
