@@ -278,7 +278,23 @@ struct Hit {
 }
 
 enum Img {
-    Ready(TextureHandle, [usize; 2]),
+    Ready {
+        handle: TextureHandle,
+        size: [usize; 2],
+        base_bytes: usize,
+        mip_bytes: usize,
+        last_used: u64,
+        editable: bool,
+    },
+    Failed,
+}
+
+enum FxImg {
+    Ready {
+        handle: TextureHandle,
+        bytes: usize,
+        last_used: u64,
+    },
     Failed,
 }
 
@@ -286,13 +302,52 @@ enum Img {
 /// it doesn't decode.
 type DecodedImage = (String, Option<(egui::ColorImage, Vec<egui::ColorImage>)>);
 
-fn decode_gui_image(bytes: &[u8]) -> Option<(egui::ColorImage, Vec<egui::ColorImage>)> {
-    let img = rustudio_core::texture::decode(bytes).ok()?;
+/// Box-filter downscale decoded RGBA8 pixels by powers of two until both
+/// dimensions fit within `max_dim` (avoids exhausting VRAM on 2 GiB GPUs when
+/// a place has hundreds of 1024²/2048² particle or BillboardGui images).
+fn downscale_rgba(mut img: rustudio_core::texture::Rgba, max_dim: u32) -> rustudio_core::texture::Rgba {
+    let (mut cw, mut ch) = (img.width, img.height);
+    if (cw <= max_dim && ch <= max_dim) || img.pixels.len() != (cw as usize) * (ch as usize) * 4 {
+        return img;
+    }
+    let mut cur = img.pixels;
+    while (cw > max_dim || ch > max_dim) && (cw > 1 || ch > 1) {
+        let (nw, nh) = ((cw / 2).max(1), (ch / 2).max(1));
+        let mut next = vec![0u8; (nw * nh * 4) as usize];
+        for y in 0..nh {
+            for x in 0..nw {
+                let mut acc = [0u32; 4];
+                for dy in 0..2 {
+                    let sy = (y * 2 + dy).min(ch - 1);
+                    for dx in 0..2 {
+                        let sx = (x * 2 + dx).min(cw - 1);
+                        let o = ((sy * cw + sx) * 4) as usize;
+                        for c in 0..4 {
+                            acc[c] += cur[o + c] as u32;
+                        }
+                    }
+                }
+                let o = ((y * nw + x) * 4) as usize;
+                for c in 0..4 {
+                    next[o + c] = ((acc[c] + 2) / 4) as u8;
+                }
+            }
+        }
+        (cw, ch, cur) = (nw, nh, next);
+    }
+    img.width = cw;
+    img.height = ch;
+    img.pixels = cur;
+    img
+}
+
+fn decode_gui_image(bytes: &[u8], max_dim: u32, max_mips: usize) -> Option<(egui::ColorImage, Vec<egui::ColorImage>)> {
+    let img = downscale_rgba(rustudio_core::texture::decode(bytes).ok()?, max_dim);
     let size = [img.width as usize, img.height as usize];
     let base = egui::ColorImage::from_rgba_unmultiplied(size, &img.pixels);
     let mut levels = Vec::new();
     let mut cur = base.clone();
-    while levels.len() < 8 && (cur.size[0] >= 8 || cur.size[1] >= 8) {
+    while levels.len() < max_mips && (cur.size[0] >= 8 || cur.size[1] >= 8) {
         cur = half_image(&cur);
         levels.push(cur.clone());
     }
@@ -303,8 +358,8 @@ fn decode_gui_image(bytes: &[u8]) -> Option<(egui::ColorImage, Vec<egui::ColorIm
 /// straight (unpremultiplied) RGBA8. Studio's ParticleCustomFS,
 /// ParticleCurveCrazySparklesFS and TrailFSLight sample unpremultiplied texels
 /// and premultiply (or split RGB/A) in the fragment shader after filtering.
-fn decode_fx_image(bytes: &[u8]) -> Option<egui::ColorImage> {
-    let img = rustudio_core::texture::decode(bytes).ok()?;
+fn decode_fx_image(bytes: &[u8], max_dim: u32) -> Option<egui::ColorImage> {
+    let img = downscale_rgba(rustudio_core::texture::decode(bytes).ok()?, max_dim);
     let size = [img.width as usize, img.height as usize];
     // `Color32::from_rgba_premultiplied` stores the four bytes untouched so
     // wgpu uploads and mipmaps straight RGBA8 without egui premultiplication.
@@ -388,12 +443,21 @@ pub struct Gui {
     image_decode: Option<(std::sync::mpsc::Sender<DecodedImage>, std::sync::mpsc::Receiver<DecodedImage>)>,
     images_ready: std::collections::VecDeque<DecodedImage>,
     /// Straight (unpremultiplied) RGBA textures for 3D effects (`fx_texture`).
-    fx_images: HashMap<String, Option<TextureHandle>>,
+    fx_images: HashMap<String, FxImg>,
     fx_images_decoding: HashSet<String>,
     fx_image_decode: Option<(
         std::sync::mpsc::Sender<(String, Option<egui::ColorImage>)>,
         std::sync::mpsc::Receiver<(String, Option<egui::ColorImage>)>,
     )>,
+    fx_images_ready: std::collections::VecDeque<(String, Option<egui::ColorImage>)>,
+    /// Estimated GPU bytes uploaded into egui for GUI + 3D effect textures.
+    gui_vram_bytes: usize,
+    /// Logged once when `gui_vram_bytes` hits `gpu_caps::gui_vram_budget()`.
+    gui_vram_warned: bool,
+    /// Frame counter for LRU eviction of unused GUI / FX textures.
+    vram_frame: u64,
+    /// Last `gpu_health::oom_epoch()` reacted to by reclaiming optional VRAM.
+    last_oom_epoch: u64,
     /// EditableImage textures (runtime/editable.rs) by id without the
     /// generation: the generation shown (updated in place when it moves on).
     editable_gens: HashMap<String, u64>,
@@ -1460,14 +1524,11 @@ fn font_of(d: &Document, r: Ref) -> (String, u32, bool) {
     let has = |n: &str| inst.is_some_and(|i| i.properties.contains_key(&rbx_dom_weak::ustr(n)));
     let face = || match d.prop(r, "FontFace") {
         Some(Variant::Font(f)) => Some((
-            // Studio writes Gotham (Font.Gotham*) as GothamSSm.json, a family
-            // its content doesn't have; it draws Montserrat for it, as the
-            // legacy Gotham fonts here (`legacy_font`).
-            if f.family.ends_with("/GothamSSm.json") {
-                "rbxasset://fonts/families/Montserrat.json".to_string()
-            } else {
-                f.family.clone()
-            },
+            // Studio writes Gotham (Font.Gotham*) as GothamSSm.json and
+            // Arial as Arial.json, families its content doesn't have; it
+            // draws Montserrat and Arimo for them, as the legacy fonts here
+            // (`legacy_font`).
+            crate::font_enum::drawn_family(&f.family),
             weight_of(f.weight),
             matches!(f.style, rbx_dom_weak::types::FontStyle::Italic),
         )),
@@ -1877,11 +1938,159 @@ impl Gui {
         true
     }
 
+    /// Advances the LRU frame clock and reclaims optional GUI/FX VRAM if a new
+    /// GPU OOM event occurred elsewhere in the renderer.
+    pub fn begin_vram_frame(&mut self) {
+        self.vram_frame = self.vram_frame.saturating_add(1);
+        self.sync_oom_pressure();
+    }
+
+    fn sync_oom_pressure(&mut self) -> bool {
+        let epoch = rustudio_render::gpu_health::oom_epoch();
+        if epoch != self.last_oom_epoch {
+            self.last_oom_epoch = epoch;
+            self.reclaim_vram(0, true);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Reclaims GUI/FX texture VRAM without disabling active particles, beams,
+    /// trails, or visible GUIs:
+    /// 1. Drops optional CPU-generated GUI mip chains (~25-33% of GUI VRAM).
+    /// 2. Evicts least-recently-used cold textures not used this frame.
+    /// 3. If still over budget, evicts oversized (> 64×64) textures so they
+    ///    reload at compact resolution on next use.
+    fn reclaim_vram(&mut self, needed_bytes: usize, force_oom_trim: bool) {
+        let budget = rustudio_render::gpu_caps::gui_vram_budget();
+        let over_budget = budget < usize::MAX && self.gui_vram_bytes.saturating_add(needed_bytes) > budget;
+        if !force_oom_trim && !over_budget {
+            return;
+        }
+        if over_budget && !self.gui_vram_warned {
+            self.gui_vram_warned = true;
+            rustudio_render::gpu_health::warn_gui_budget(self.gui_vram_bytes, budget);
+        }
+        let target = if budget == usize::MAX {
+            usize::MAX
+        } else if force_oom_trim {
+            (budget * 3 / 4).saturating_sub(needed_bytes)
+        } else {
+            budget.saturating_sub(needed_bytes)
+        };
+        let mut freed = 0usize;
+
+        // Pass 1: Drop optional GUI mipmap copies first (zero missing images).
+        if !self.mips.is_empty() {
+            self.mips.clear();
+            for img in self.images.values_mut() {
+                if let Img::Ready { mip_bytes, .. } = img {
+                    if *mip_bytes > 0 {
+                        self.gui_vram_bytes = self.gui_vram_bytes.saturating_sub(*mip_bytes);
+                        freed = freed.saturating_add(*mip_bytes);
+                        *mip_bytes = 0;
+                    }
+                }
+            }
+        }
+
+        // Pass 2: Evict least-recently-used cold textures (never those used on
+        // the current frame, and never EditableImages).
+        let need_evict = (budget < usize::MAX && self.gui_vram_bytes > target) || force_oom_trim;
+        if need_evict {
+            let cur = self.vram_frame;
+            // When budget is unlimited (e.g. RUSTUDIO_GUI_VRAM_MB=0) but an OOM
+            // happened, only evict textures idle for >= 120 frames (~2s).
+            let max_last_used = if budget == usize::MAX {
+                cur.saturating_sub(120)
+            } else {
+                cur.saturating_sub(1)
+            };
+            let mut candidates: Vec<(u64, usize, bool, String)> = Vec::new();
+            for (k, v) in &self.images {
+                if let Img::Ready { base_bytes, mip_bytes, last_used, editable, .. } = v {
+                    if !*editable && *last_used <= max_last_used {
+                        candidates.push((*last_used, base_bytes + mip_bytes, false, k.clone()));
+                    }
+                }
+            }
+            for (k, v) in &self.fx_images {
+                if let FxImg::Ready { bytes, last_used, .. } = v {
+                    if *last_used <= max_last_used {
+                        candidates.push((*last_used, *bytes, true, k.clone()));
+                    }
+                }
+            }
+            // Oldest first; break ties by largest allocation first.
+            candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+            for (_, bytes, is_fx, key) in candidates {
+                if budget < usize::MAX && self.gui_vram_bytes <= target {
+                    break;
+                }
+                if is_fx {
+                    self.fx_images.remove(&key);
+                } else {
+                    self.images.remove(&key);
+                    self.mips.remove(&key);
+                }
+                self.gui_vram_bytes = self.gui_vram_bytes.saturating_sub(bytes);
+                freed = freed.saturating_add(bytes);
+            }
+        }
+
+        // Pass 3: If STILL over budget (everything is active at once), evict
+        // oversized (> 64×64) textures from earlier frames so they reload at
+        // compact 64×64 (~16 KiB) resolution instead of stopping effects.
+        const COMPACT_BYTES: usize = 64 * 64 * 4;
+        if budget < usize::MAX && self.gui_vram_bytes > target {
+            let mut oversized: Vec<(u64, usize, bool, String)> = Vec::new();
+            for (k, v) in &self.images {
+                if let Img::Ready { base_bytes, mip_bytes, last_used, editable, .. } = v {
+                    let b = base_bytes + mip_bytes;
+                    if !*editable && b > COMPACT_BYTES && *last_used < self.vram_frame {
+                        oversized.push((*last_used, b, false, k.clone()));
+                    }
+                }
+            }
+            for (k, v) in &self.fx_images {
+                if let FxImg::Ready { bytes, last_used, .. } = v {
+                    if *bytes > COMPACT_BYTES && *last_used < self.vram_frame {
+                        oversized.push((*last_used, *bytes, true, k.clone()));
+                    }
+                }
+            }
+            oversized.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            for (_, bytes, is_fx, key) in oversized {
+                if self.gui_vram_bytes <= target {
+                    break;
+                }
+                if is_fx {
+                    self.fx_images.remove(&key);
+                } else {
+                    self.images.remove(&key);
+                    self.mips.remove(&key);
+                }
+                self.gui_vram_bytes = self.gui_vram_bytes.saturating_sub(bytes);
+                freed = freed.saturating_add(bytes);
+            }
+        }
+
+        rustudio_render::gpu_health::note_vram_reclaimed("GUI/FX textures", freed);
+    }
+
+    fn compact_color_image(mut img: egui::ColorImage, max_dim: usize) -> egui::ColorImage {
+        while (img.size[0] > max_dim || img.size[1] > max_dim) && (img.size[0] > 1 || img.size[1] > 1) {
+            img = half_image(&img);
+        }
+        img
+    }
+
     /// Whether an image went through `texture` (GUI images and, since
     /// round 26, effect textures): loaded, failed, or never asked for (None).
     pub fn image_state(&self, id: &str) -> Option<Result<(), String>> {
         match self.images.get(id)? {
-            Img::Ready(..) => Some(Ok(())),
+            Img::Ready { .. } => Some(Ok(())),
             Img::Failed => Some(Err("not decoded or unavailable".into())),
         }
     }
@@ -1894,28 +2103,45 @@ impl Gui {
         doc_dir: Option<&std::path::Path>,
         id: &str,
     ) -> Option<(egui::TextureId, [usize; 2])> {
+        let now_frame = self.vram_frame;
         if let Some((base, gen)) = rustudio_core::editable_source::image_key(id) {
             // (EditableImage pixels change without a document mark)
             self.no_cache = Some("editable image");
             if self.editable_gens.get(base).is_some_and(|h| *h >= gen) {
-                if let Some(Img::Ready(h, s)) = self.images.get(base) {
-                    return Some((h.id(), *s));
+                if let Some(Img::Ready { handle, size, last_used, .. }) = self.images.get_mut(base) {
+                    *last_used = now_frame;
+                    return Some((handle.id(), *size));
                 }
             }
             let (now, img) = rustudio_core::editable_source::image_pixels(id)?;
             let size = [img.width as usize, img.height as usize];
+            let new_bytes = size[0].saturating_mul(size[1]).saturating_mul(4);
             let color = egui::ColorImage::from_rgba_unmultiplied(size, &img.pixels);
             let opts = egui::TextureOptions::NEAREST;
             let out = match self.images.get_mut(base) {
-                Some(Img::Ready(h, s)) => {
-                    h.set(color, opts);
+                Some(Img::Ready { handle, size: s, base_bytes, last_used, .. }) => {
+                    handle.set(color, opts);
                     *s = size;
-                    (h.id(), size)
+                    self.gui_vram_bytes = self.gui_vram_bytes.saturating_sub(*base_bytes).saturating_add(new_bytes);
+                    *base_bytes = new_bytes;
+                    *last_used = now_frame;
+                    (handle.id(), size)
                 }
                 _ => {
-                    let h = ctx.load_texture(format!("gui:{base}"), color, opts);
-                    let out = (h.id(), size);
-                    self.images.insert(base.to_string(), Img::Ready(h, size));
+                    let handle = ctx.load_texture(format!("gui:{base}"), color, opts);
+                    let out = (handle.id(), size);
+                    self.gui_vram_bytes = self.gui_vram_bytes.saturating_add(new_bytes);
+                    self.images.insert(
+                        base.to_string(),
+                        Img::Ready {
+                            handle,
+                            size,
+                            base_bytes: new_bytes,
+                            mip_bytes: 0,
+                            last_used: now_frame,
+                            editable: true,
+                        },
+                    );
                     out
                 }
             };
@@ -1928,9 +2154,12 @@ impl Gui {
         if self.images_decoding.contains(id) {
             self.poll_images(ctx);
         }
-        if let Some(i) = self.images.get(id) {
+        if let Some(i) = self.images.get_mut(id) {
             return match i {
-                Img::Ready(h, s) => Some((h.id(), *s)),
+                Img::Ready { handle, size, last_used, .. } => {
+                    *last_used = now_frame;
+                    Some((handle.id(), *size))
+                }
                 Img::Failed => None,
             };
         }
@@ -1973,26 +2202,79 @@ impl Gui {
                 }
             }
         }
+        self.sync_oom_pressure();
+        let (max_dim, max_mips) = self.gui_image_limits();
         // Fixed-step runs decode here, so captures don't depend on the
         // host's timing; otherwise the decode and mip levels are made on
         // the decode threads and the image shows from the frame they land
         // (as while it downloads).
         if rustudio_core::sim_clock::on() {
-            let decoded = decode_gui_image(&bytes);
+            let decoded = decode_gui_image(&bytes, max_dim, max_mips);
             return self.finish_image(ctx, id, decoded);
+        }
+        if self.images_decoding.len() + self.images_ready.len() >= 16 {
+            self.no_cache = Some("image decode queue full");
+            ctx.request_repaint();
+            return None;
         }
         let (tx, _) = self.image_decode.get_or_insert_with(std::sync::mpsc::channel);
         let tx = tx.clone();
         let repaint = ctx.clone();
         let name = id.to_string();
         decode_off_thread(Box::new(move || {
-            let decoded = decode_gui_image(&bytes);
+            let decoded = decode_gui_image(&bytes, max_dim, max_mips);
             let _ = tx.send((name, decoded));
             repaint.request_repaint();
         }));
         self.images_decoding.insert(id.to_string());
         self.no_cache = Some("image loading");
         None
+    }
+
+    fn gui_image_limits(&self) -> (u32, usize) {
+        let low = rustudio_render::gpu_caps::is_low_vram_global();
+        let oom = rustudio_render::gpu_health::oom_seen();
+        let budget = rustudio_render::gpu_caps::gui_vram_budget();
+        let (mut max_dim, mut max_mips) = if low { (512u32, 2usize) } else { (u32::MAX, 8usize) };
+        if oom {
+            max_dim = max_dim.min(if low { 64 } else { 128 });
+            max_mips = 0;
+        }
+        if budget < usize::MAX {
+            let b = budget.max(1);
+            if self.gui_vram_bytes >= b {
+                max_dim = max_dim.min(64);
+                max_mips = 0;
+            } else if self.gui_vram_bytes.saturating_mul(5) >= b.saturating_mul(4) {
+                max_dim = max_dim.min(128);
+                max_mips = 0;
+            } else if self.gui_vram_bytes.saturating_mul(2) >= b {
+                max_dim = max_dim.min(if oom { 64 } else { 256 });
+                max_mips = max_mips.min(1);
+            }
+        }
+        (max_dim, max_mips)
+    }
+
+    fn fx_image_max_dim(&self) -> u32 {
+        let low = rustudio_render::gpu_caps::is_low_vram_global();
+        let oom = rustudio_render::gpu_health::oom_seen();
+        let budget = rustudio_render::gpu_caps::gui_vram_budget();
+        let mut max_dim = if low { 256u32 } else { u32::MAX };
+        if oom {
+            max_dim = max_dim.min(if low { 64 } else { 128 });
+        }
+        if budget < usize::MAX {
+            let b = budget.max(1);
+            if self.gui_vram_bytes >= b {
+                max_dim = max_dim.min(64);
+            } else if self.gui_vram_bytes.saturating_mul(5) >= b.saturating_mul(4) {
+                max_dim = max_dim.min(if low || oom { 64 } else { 256 });
+            } else if self.gui_vram_bytes.saturating_mul(2) >= b {
+                max_dim = max_dim.min(if low || oom { 64 } else { 512 });
+            }
+        }
+        max_dim
     }
 
     /// Makes the textures of images decoded off the main thread, at most
@@ -2026,20 +2308,57 @@ impl Gui {
         id: &str,
         decoded: Option<(egui::ColorImage, Vec<egui::ColorImage>)>,
     ) -> Option<(egui::TextureId, [usize; 2])> {
-        let Some((base, levels)) = decoded else {
+        let Some((mut base, mut levels)) = decoded else {
             self.images.insert(id.to_string(), Img::Failed);
             return None;
         };
+        let oom_changed = self.sync_oom_pressure();
+        let oom = rustudio_render::gpu_health::oom_seen();
+        let budget = rustudio_render::gpu_caps::gui_vram_budget();
+        let mut base_bytes = base.pixels.len() * 4;
+        let mut mip_bytes: usize = levels.iter().map(|l| l.pixels.len() * 4).sum();
+        if oom || (budget < usize::MAX && self.gui_vram_bytes.saturating_add(base_bytes + mip_bytes) > budget) {
+            // Drop optional mip levels first and reclaim LRU textures so the
+            // image still loads instead of disappearing.
+            levels.clear();
+            mip_bytes = 0;
+            self.reclaim_vram(base_bytes, oom_changed);
+            if oom || (budget < usize::MAX && self.gui_vram_bytes.saturating_add(base_bytes) > budget) {
+                let cap = if budget < usize::MAX && self.gui_vram_bytes.saturating_add(base_bytes) > budget {
+                    64
+                } else {
+                    self.gui_image_limits().0 as usize
+                };
+                if base.size[0] > cap || base.size[1] > cap {
+                    base = Self::compact_color_image(base, cap);
+                    base_bytes = base.pixels.len() * 4;
+                }
+            }
+        }
         let levels = levels
             .into_iter()
             .enumerate()
             .map(|(i, level)| ctx.load_texture(format!("gui:{id}#{}", i + 1), level, egui::TextureOptions::LINEAR))
-            .collect();
-        self.mips.insert(id.to_string(), levels);
+            .collect::<Vec<_>>();
+        if !levels.is_empty() {
+            self.mips.insert(id.to_string(), levels);
+        }
         let size = base.size;
-        let h = ctx.load_texture(format!("gui:{id}"), base, egui::TextureOptions::LINEAR);
-        let out = (h.id(), size);
-        self.images.insert(id.to_string(), Img::Ready(h, size));
+        let handle = ctx.load_texture(format!("gui:{id}"), base, egui::TextureOptions::LINEAR);
+        let added_bytes = base_bytes.saturating_add(mip_bytes);
+        self.gui_vram_bytes = self.gui_vram_bytes.saturating_add(added_bytes);
+        let out = (handle.id(), size);
+        self.images.insert(
+            id.to_string(),
+            Img::Ready {
+                handle,
+                size,
+                base_bytes,
+                mip_bytes,
+                last_used: self.vram_frame,
+                editable: false,
+            },
+        );
         share().loaded.insert(id.to_string());
         Some(out)
     }
@@ -2055,19 +2374,58 @@ impl Gui {
         doc_dir: Option<&std::path::Path>,
         id: &str,
     ) -> Option<egui::TextureId> {
+        let oom_changed = self.sync_oom_pressure();
         if let Some((_, rx)) = &self.fx_image_decode {
-            let ready: Vec<_> = rx.try_iter().collect();
-            for (name, decoded) in ready {
-                self.fx_images_decoding.remove(&name);
-                let handle = decoded.map(|img| ctx.load_texture(format!("fx:{name}"), img, egui::TextureOptions::LINEAR));
-                self.fx_images.insert(name, handle);
+            self.fx_images_ready.extend(rx.try_iter());
+        }
+        let mut frame_budget: usize = 8 << 20;
+        let mut first = true;
+        let budget = rustudio_render::gpu_caps::gui_vram_budget();
+        let oom = rustudio_render::gpu_health::oom_seen();
+        while let Some((_, decoded)) = self.fx_images_ready.front() {
+            let bytes = decoded.as_ref().map_or(0, |img| img.pixels.len() * 4);
+            if !first && bytes > frame_budget {
+                ctx.request_repaint();
+                break;
             }
+            first = false;
+            frame_budget = frame_budget.saturating_sub(bytes);
+            let (name, decoded) = self.fx_images_ready.pop_front().expect("front");
+            self.fx_images_decoding.remove(&name);
+            let entry = match decoded {
+                None => FxImg::Failed,
+                Some(mut img) => {
+                    let mut b = img.pixels.len() * 4;
+                    if oom || (budget < usize::MAX && self.gui_vram_bytes.saturating_add(b) > budget) {
+                        self.reclaim_vram(b, oom_changed);
+                        let cap = if budget < usize::MAX && self.gui_vram_bytes.saturating_add(b) > budget {
+                            64
+                        } else {
+                            self.fx_image_max_dim() as usize
+                        };
+                        if img.size[0] > cap || img.size[1] > cap {
+                            img = Self::compact_color_image(img, cap);
+                            b = img.pixels.len() * 4;
+                        }
+                    }
+                    self.gui_vram_bytes = self.gui_vram_bytes.saturating_add(b);
+                    let handle = ctx.load_texture(format!("fx:{name}"), img, egui::TextureOptions::LINEAR);
+                    FxImg::Ready { handle, bytes: b, last_used: self.vram_frame }
+                }
+            };
+            self.fx_images.insert(name, entry);
         }
         if !store.allows(id) {
             return None;
         }
-        if let Some(entry) = self.fx_images.get(id) {
-            return entry.as_ref().map(|h| h.id());
+        if let Some(entry) = self.fx_images.get_mut(id) {
+            return match entry {
+                FxImg::Ready { handle, last_used, .. } => {
+                    *last_used = self.vram_frame;
+                    Some(handle.id())
+                }
+                FxImg::Failed => None,
+            };
         }
         if self.fx_images_decoding.contains(id) {
             return None;
@@ -2076,7 +2434,7 @@ impl Gui {
             Fetch::Ready(b) => b,
             Fetch::Pending => return None,
             Fetch::Unavailable(_) => {
-                self.fx_images.insert(id.to_string(), None);
+                self.fx_images.insert(id.to_string(), FxImg::Failed);
                 return None;
             }
         };
@@ -2094,23 +2452,46 @@ impl Gui {
                 Some(Fetch::Ready(b)) => bytes = b,
                 Some(Fetch::Pending) => return None,
                 _ => {
-                    self.fx_images.insert(id.to_string(), None);
+                    self.fx_images.insert(id.to_string(), FxImg::Failed);
                     return None;
                 }
             }
         }
+        let max_dim = self.fx_image_max_dim();
         if rustudio_core::sim_clock::on() {
-            let handle = decode_fx_image(&bytes).map(|img| ctx.load_texture(format!("fx:{id}"), img, egui::TextureOptions::LINEAR));
-            let tid = handle.as_ref().map(|h| h.id());
-            self.fx_images.insert(id.to_string(), handle);
+            let entry = match decode_fx_image(&bytes, max_dim) {
+                None => FxImg::Failed,
+                Some(mut img) => {
+                    let mut b = img.pixels.len() * 4;
+                    if oom || (budget < usize::MAX && self.gui_vram_bytes.saturating_add(b) > budget) {
+                        self.reclaim_vram(b, oom_changed);
+                        if budget < usize::MAX && self.gui_vram_bytes.saturating_add(b) > budget {
+                            img = Self::compact_color_image(img, 64);
+                            b = img.pixels.len() * 4;
+                        }
+                    }
+                    self.gui_vram_bytes = self.gui_vram_bytes.saturating_add(b);
+                    let handle = ctx.load_texture(format!("fx:{id}"), img, egui::TextureOptions::LINEAR);
+                    FxImg::Ready { handle, bytes: b, last_used: self.vram_frame }
+                }
+            };
+            let tid = match &entry {
+                FxImg::Ready { handle, .. } => Some(handle.id()),
+                FxImg::Failed => None,
+            };
+            self.fx_images.insert(id.to_string(), entry);
             return tid;
+        }
+        if self.fx_images_decoding.len() + self.fx_images_ready.len() >= 16 {
+            ctx.request_repaint();
+            return None;
         }
         let (tx, _) = self.fx_image_decode.get_or_insert_with(std::sync::mpsc::channel);
         let tx = tx.clone();
         let repaint = ctx.clone();
         let name = id.to_string();
         decode_off_thread(Box::new(move || {
-            let decoded = decode_fx_image(&bytes);
+            let decoded = decode_fx_image(&bytes, max_dim);
             let _ = tx.send((name, decoded));
             repaint.request_repaint();
         }));
@@ -2464,6 +2845,62 @@ mod tests {
         assert_eq!(h.size, [2, 1]);
         assert_eq!(h.pixels[0], px(128));
         assert_eq!(h.pixels[1], px(20));
+    }
+
+    #[test]
+    fn downscale_rgba_caps_large_textures() {
+        let img = rustudio_core::texture::Rgba {
+            width: 512,
+            height: 256,
+            pixels: vec![120u8; 512 * 256 * 4],
+        };
+        let out = downscale_rgba(img, 128);
+        assert_eq!((out.width, out.height), (128, 64));
+        assert_eq!(out.pixels.len(), 128 * 64 * 4);
+        assert!(out.pixels.iter().all(|&b| b == 120));
+    }
+
+    #[test]
+    fn reclaim_vram_drops_mips_and_lru_without_blocking_active_fx() {
+        let ctx = egui::Context::default();
+        let mut gui = Gui::default();
+        gui.vram_frame = 1;
+
+        // Frame 1: load a cold GUI texture with mip levels and a cold FX texture.
+        let big = egui::ColorImage::filled([256, 256], Color32::from_rgba_premultiplied(200, 100, 50, 255));
+        let mip = egui::ColorImage::filled([128, 128], Color32::from_rgba_premultiplied(200, 100, 50, 255));
+        assert!(gui.finish_image(&ctx, "cold_gui", Some((big.clone(), vec![mip]))).is_some());
+        assert!(gui.mips.contains_key("cold_gui"));
+        let cold_fx_h = ctx.load_texture("fx:cold_fx", big.clone(), egui::TextureOptions::LINEAR);
+        let cold_fx_bytes = big.pixels.len() * 4;
+        gui.gui_vram_bytes += cold_fx_bytes;
+        gui.fx_images.insert(
+            "cold_fx".into(),
+            FxImg::Ready { handle: cold_fx_h, bytes: cold_fx_bytes, last_used: 1 },
+        );
+
+        // Frame 2: load an active FX texture used this frame.
+        gui.vram_frame = 2;
+        let active_fx_h = ctx.load_texture("fx:active_fx", big.clone(), egui::TextureOptions::LINEAR);
+        gui.gui_vram_bytes += cold_fx_bytes;
+        gui.fx_images.insert(
+            "active_fx".into(),
+            FxImg::Ready { handle: active_fx_h, bytes: cold_fx_bytes, last_used: 2 },
+        );
+        let before = gui.gui_vram_bytes;
+        assert!(before > 0);
+
+        // Force OOM reclamation: drops optional mips + cold LRU entries,
+        // keeps the active current-frame FX texture alive.
+        gui.reclaim_vram(0, true);
+        assert!(gui.mips.is_empty(), "optional GUI mips should be purged under pressure");
+        assert!(gui.gui_vram_bytes < before, "reclaim_vram should free tracked bytes");
+        assert!(matches!(gui.fx_images.get("active_fx"), Some(FxImg::Ready { .. })));
+
+        // Compact helper scales oversized images cleanly to <= 64x64 (~16 KiB).
+        let compacted = Gui::compact_color_image(big, 64);
+        assert_eq!(compacted.size, [64, 64]);
+        assert_eq!(compacted.pixels.len() * 4, 64 * 64 * 4);
     }
 
     #[test]
@@ -2834,12 +3271,7 @@ pub fn legacy_face_key(enum_name: &str) -> FaceKey {
 }
 
 pub fn normalize_face_key(family: &str, weight: u32, italic: bool) -> FaceKey {
-    let fam = if family.ends_with("/GothamSSm.json") {
-        "rbxasset://fonts/families/Montserrat.json".to_string()
-    } else {
-        family.to_string()
-    };
-    (fam, weight, italic)
+    (crate::font_enum::drawn_family(family), weight, italic)
 }
 
 /// Standalone measure-only `Fonts` backed by Studio's local content fonts +

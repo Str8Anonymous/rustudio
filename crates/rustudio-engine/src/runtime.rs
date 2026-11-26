@@ -2677,6 +2677,26 @@ fn prop_get_routed(
 }
 
 fn prop_get_special(lua: &Lua, r: Ref, class: &str, key: &str) -> mlua::Result<Option<Value>> {
+    // A text object's Font is its FontFace's Enum.Font item (font_enum.rs);
+    // a file from before FontFace keeps only Font.
+    if key == "Font" && crate::font_enum::has_font_view(class) {
+        let v = {
+            let w = world(lua)?;
+            let d = w.d();
+            let stored = |n: &str| {
+                d.dom.get_by_ref(r).and_then(|i| i.properties.get(&rbx_dom_weak::ustr(n)).cloned())
+            };
+            match (stored("FontFace"), stored("Font")) {
+                (Some(Variant::Font(f)), _) => crate::font_enum::enum_of_face(&f),
+                (_, Some(Variant::Enum(e))) => e.to_u32(),
+                _ => match d.prop(r, "FontFace") {
+                    Some(Variant::Font(f)) => crate::font_enum::enum_of_face(&f),
+                    _ => 0,
+                },
+            }
+        };
+        return Ok(Some(variant_to_lua(lua, &Variant::Enum(Enum::from_u32(v)), Some("Font"))?));
+    }
     if class == "Bone" && matches!(key, "TransformedCFrame" | "TransformedWorldCFrame") {
         let d = world(lua)?;
         let xf = if key == "TransformedCFrame" { rustudio_core::attachment::local(d.d(), r, true) }
@@ -2870,7 +2890,7 @@ pub fn set_parent(lua: &Lua, r: Ref, new_parent: Ref) -> mlua::Result<()> {
 }
 
 fn set_parent_opts(lua: &Lua, r: Ref, new_parent: Ref, replicate: bool, stop_scripts: bool, pose: domains::world::part::EnterPose) -> mlua::Result<()> {
-    let (old, descendants, lost, snaps, enters_ws, stopped, gripped, ungripped, edit_sound) = {
+    let (old, descendants, lost, snaps, enters_ws, stopped, gripped, ungripped, moved_sounds) = {
         let mut w = world(lua)?;
         let old = w
             .d()
@@ -2973,10 +2993,19 @@ fn set_parent_opts(lua: &Lua, r: Ref, new_parent: Ref, replicate: bool, stop_scr
         } else {
             HashSet::new()
         };
-        let edit_sound = w.mode == RunMode::Edit && w.d().class_of(r).as_deref() == Some("Sound");
+        // Sounds that moved: Studio loads a Sound (or a Clone of one) as it
+        // enters the DataModel, its descendants too, and unloads it on
+        // leaving, in Edit and in Play alike (checks/sound-clone-load).
+        let moved_sounds: Vec<Ref> = {
+            let d = w.d();
+            std::iter::once(r)
+                .chain(descendants.iter().copied())
+                .filter(|s| d.dom.get_by_ref(*s).is_some_and(|i| i.class == "Sound"))
+                .collect()
+        };
         let gripped = if w.mode != RunMode::Edit { crate::tool_grip::gripped_tools(w.d(), r, enters_ws) } else { Vec::new() };
         let ungripped = if w.mode != RunMode::Edit { crate::tool_grip::ungripped_welds(w.d(), r, old) } else { Vec::new() };
-        (old, descendants, lost, snaps, enters_ws, stopped, gripped, ungripped, edit_sound)
+        (old, descendants, lost, snaps, enters_ws, stopped, gripped, ungripped, moved_sounds)
     };
     for (model, pivot) in lost {
         store_prop(lua, model, "PrimaryPart", Variant::Ref(Ref::none()))?;
@@ -2991,8 +3020,8 @@ fn set_parent_opts(lua: &Lua, r: Ref, new_parent: Ref, replicate: bool, stop_scr
         apply_assembly_pose(&mut w, moves);
     }
     fire_parent_signals(lua, r, old, new_parent, descendants)?;
-    if edit_sound {
-        domains::media::touch_sound(lua, r)?;
+    for s in moved_sounds {
+        domains::media::touch_sound(lua, s)?;
     }
     // After the hierarchy signals (Studio: an AncestryChanged handler on the Tool still
     // reads CanCollide true; EquipTool has returned with it false): the queued
@@ -3594,6 +3623,10 @@ fn store_prop_in_world(
             for legacy in doc::content_legacy_names(name) {
                 inst.properties.remove(&ustr(legacy));
             }
+        } else if name == "FontFace" && crate::font_enum::has_font_view(inst.class.as_str()) {
+            // The legacy Font enum is a view of FontFace (font_enum.rs): a
+            // stored one would be stale now.
+            inst.properties.remove(&ustr("Font"));
         }
         (old.as_ref() != Some(&v), unset)
     };
@@ -4163,6 +4196,35 @@ fn newindex_routed(
         if new <= 0.0 && old > 0.0 {
             w.fire(r, "Died", vec![]);
             w.died.push(r);
+        }
+        return Ok(());
+    }
+    // A text object's Font writes its FontFace (font_enum.rs, Studio's
+    // faces); Enum.Font.Unknown writes nothing.
+    if canon == "Font" && crate::font_enum::has_font_view(class) {
+        let Variant::Enum(e) = v else { return Ok(()) };
+        let Some(face) = crate::font_enum::face_of_enum(e.to_u32()) else { return Ok(()) };
+        let before = world(lua)?.d().prop(r, "FontFace");
+        let changed = !matches!(&before, Some(Variant::Font(f))
+            if f.family == face.family && f.weight == face.weight && f.style == face.style);
+        store_prop(lua, r, "FontFace", Variant::Font(face))?;
+        if changed {
+            fire_changed(lua, r, "Font")?;
+        }
+        return Ok(());
+    }
+    // (and a FontFace write changes what Font reads: Changed for both, as
+    // Studio fires them)
+    if canon == "FontFace" && crate::font_enum::has_font_view(class) {
+        let view = |v: Option<Variant>| match v {
+            Some(Variant::Font(f)) => Some((f.family, f.weight, f.style)),
+            _ => None,
+        };
+        let before = view(world(lua)?.d().prop(r, "FontFace"));
+        let after = view(Some(v.clone()));
+        store_prop_key(lua, r, info.canon, v)?;
+        if before != after {
+            fire_changed(lua, r, "Font")?;
         }
         return Ok(());
     }
@@ -9930,6 +9992,10 @@ mod attachment_tests;
 #[cfg(test)]
 #[path = "selftest/bridge.rs"]
 mod bridge_tests;
+
+#[cfg(test)]
+#[path = "selftest/text_font.rs"]
+mod text_font_tests;
 
 /// `Runtime::notify_prop` from inside Lua (ChangeHistoryService's undo,
 /// src/plugin_host/api_history.rs): Changed for a property changed outside

@@ -901,6 +901,7 @@ impl Game {
                             maps.release_pixels();
                         }
                         Lookup::Ready(_) if textures.over_upload_budget() => {
+                            textures.touch_decoded(color);
                             textures.defer_upload();
                             waiting = true;
                         }
@@ -2359,6 +2360,7 @@ impl Game {
         // including when Show UI / RUSTUDIO_NO_GUI skips Gui::draw; otherwise
         // live particles and beams accumulate all previous frames' geometry.
         self.gui.world_batches.clear();
+        self.gui.begin_vram_frame();
         let playing = self.play.is_some();
         self.gui.pointer_override = self.lock_center_held().then(|| rect.center());
         {
@@ -2737,18 +2739,20 @@ impl Game {
             .as_ref()
             .and_then(|p| p.parent())
             .map(|p| p.to_path_buf());
-        // Every face's bytes first: nothing is decoded while one downloads.
+        // Every face's bytes first: queue all 6 downloads in parallel and wait
+        // until none are pending before decoding.
         let mut bytes = Vec::new();
+        let mut pending = false;
         for id in &faces {
             match self.assets.content(id, doc_dir.as_deref()) {
                 rustudio_core::assets::Fetch::Ready(b) => bytes.push(b),
-                // Still downloading: try again next frame.
-                rustudio_core::assets::Fetch::Pending => {
-                    self.lighting.sky_failed = true;
-                    return;
-                }
-                rustudio_core::assets::Fetch::Unavailable(_) => break,
+                rustudio_core::assets::Fetch::Pending => pending = true,
+                rustudio_core::assets::Fetch::Unavailable(_) => {}
             }
+        }
+        if pending {
+            self.lighting.sky_failed = true;
+            return;
         }
         self.lighting.sky_key = key.clone();
         self.lighting.sky_failed = false;

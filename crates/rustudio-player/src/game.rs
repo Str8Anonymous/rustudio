@@ -249,7 +249,7 @@ fn timestamp() -> String {
 impl Game {
     pub fn push_log(&mut self, level: Level, text: impl Into<String>) {
         let text = text.into();
-        if level != Level::Info {
+        if matches!(level, Level::Warn | Level::Error) {
             eprintln!("[{level:?}] {text}");
         }
         tee_log(&text);

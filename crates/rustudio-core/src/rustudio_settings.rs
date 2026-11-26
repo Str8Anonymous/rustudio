@@ -105,16 +105,18 @@ pub enum BuiltinTool {
     ViewSelector,
     RigBuilder,
     MaterialPicker,
+    AnimationEditor,
 }
 
 impl BuiltinTool {
-    pub const ALL: [BuiltinTool; 6] = [
+    pub const ALL: [BuiltinTool; 7] = [
         BuiltinTool::Toolbox,
         BuiltinTool::TerrainEditor,
         BuiltinTool::Draggers,
         BuiltinTool::ViewSelector,
         BuiltinTool::RigBuilder,
         BuiltinTool::MaterialPicker,
+        BuiltinTool::AnimationEditor,
     ];
 
     pub fn key(self) -> &'static str {
@@ -125,6 +127,7 @@ impl BuiltinTool {
             BuiltinTool::ViewSelector => "builtin_view_selector",
             BuiltinTool::RigBuilder => "builtin_rig_builder",
             BuiltinTool::MaterialPicker => "builtin_material_picker",
+            BuiltinTool::AnimationEditor => "builtin_animation_editor",
         }
     }
 
@@ -136,6 +139,7 @@ impl BuiltinTool {
             BuiltinTool::ViewSelector => "RUSTUDIO_BUILTIN_VIEW_SELECTOR",
             BuiltinTool::RigBuilder => "RUSTUDIO_BUILTIN_RIG_BUILDER",
             BuiltinTool::MaterialPicker => "RUSTUDIO_BUILTIN_MATERIAL_PICKER",
+            BuiltinTool::AnimationEditor => "RUSTUDIO_BUILTIN_ANIMATION_EDITOR",
         }
     }
 
@@ -160,6 +164,8 @@ impl BuiltinTool {
             Some(BuiltinTool::RigBuilder)
         } else if stem.eq_ignore_ascii_case("MaterialPicker") {
             Some(BuiltinTool::MaterialPicker)
+        } else if stem.eq_ignore_ascii_case("AnimationClipEditor") {
+            Some(BuiltinTool::AnimationEditor)
         } else {
             None
         }
@@ -177,6 +183,7 @@ pub struct BuiltinToolChoices {
     pub view_selector: ToolImpl,
     pub rig_builder: ToolImpl,
     pub material_picker: ToolImpl,
+    pub animation_editor: ToolImpl,
 }
 
 impl BuiltinToolChoices {
@@ -190,6 +197,7 @@ impl BuiltinToolChoices {
             view_selector: builtin_tool_impl(BuiltinTool::ViewSelector),
             rig_builder: builtin_tool_impl(BuiltinTool::RigBuilder),
             material_picker: builtin_tool_impl(BuiltinTool::MaterialPicker),
+            animation_editor: builtin_tool_impl(BuiltinTool::AnimationEditor),
         }
     }
 
@@ -204,6 +212,7 @@ impl BuiltinToolChoices {
             view_selector: ToolImpl::Roblox,
             rig_builder: ToolImpl::Roblox,
             material_picker: ToolImpl::Roblox,
+            animation_editor: ToolImpl::Roblox,
         }
     }
 
@@ -215,6 +224,7 @@ impl BuiltinToolChoices {
             BuiltinTool::ViewSelector => self.view_selector,
             BuiltinTool::RigBuilder => self.rig_builder,
             BuiltinTool::MaterialPicker => self.material_picker,
+            BuiltinTool::AnimationEditor => self.animation_editor,
         }
     }
 
@@ -364,6 +374,14 @@ pub const OPTS: &[Opt] = &[
         label: "Material Picker",
         desc: "Use rustudio's native Material picker or Roblox's built-in MaterialPicker plugin. Applies when opening a place or restarting.",
         env: "RUSTUDIO_BUILTIN_MATERIAL_PICKER",
+        kind: OptKind::Choice(TOOL_IMPLS),
+    },
+    Opt {
+        key: "builtin_animation_editor",
+        cat: "Plugins",
+        label: "Animation Editor",
+        desc: "Use rustudio's native Animation Editor or Roblox's built-in AnimationClipEditor plugin. Applies when opening a place or restarting.",
+        env: "RUSTUDIO_BUILTIN_ANIMATION_EDITOR",
         kind: OptKind::Choice(TOOL_IMPLS),
     },
     Opt {
@@ -875,6 +893,7 @@ pub fn shown(o: &Opt) -> Shown {
         "builtin_view_selector" => Shown::Choice(usize::from(builtin_tool_impl(BuiltinTool::ViewSelector) == ToolImpl::Roblox)),
         "builtin_rig_builder" => Shown::Choice(usize::from(builtin_tool_impl(BuiltinTool::RigBuilder) == ToolImpl::Roblox)),
         "builtin_material_picker" => Shown::Choice(usize::from(builtin_tool_impl(BuiltinTool::MaterialPicker) == ToolImpl::Roblox)),
+        "builtin_animation_editor" => Shown::Choice(usize::from(builtin_tool_impl(BuiltinTool::AnimationEditor) == ToolImpl::Roblox)),
         "project_any_path" => Shown::Bool(project_any_path()),
         "classic_death_sound" => Shown::Bool(classic_death_sound_fetch()),
         "update_check" => Shown::Bool(update_check()),
@@ -1045,6 +1064,7 @@ mod tests {
             view_selector: ToolImpl::Roblox,
             rig_builder: ToolImpl::Roblox,
             material_picker: ToolImpl::Roblox,
+            animation_editor: ToolImpl::Roblox,
         };
         for tool in BuiltinTool::ALL {
             assert!(!off.use_roblox(tool));

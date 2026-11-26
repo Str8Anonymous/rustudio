@@ -2437,10 +2437,8 @@ impl Game {
     /// The place's avatar setting (StarterPlayer.GameSettingsAvatar: R6 /
     /// R15; PlayerChoice leaves it to the avatar).
     pub fn place_rig(&self) -> Option<RigType> {
-        let root = self.doc.dom.root_ref();
         self.doc
-            .find_child(root, "StarterPlayer")
-            .and_then(|sp| rustudio_render::scene::enum_u32(self.doc.prop(sp, "GameSettingsAvatar")))
+            .explicit_avatar_type()
             .and_then(|v| match v {
                 0 => Some(RigType::R6),
                 1 => Some(RigType::R15),

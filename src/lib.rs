@@ -17,6 +17,7 @@
 //!
 //! `src/main.rs` is the GUI entry point and calls [`run`].
 
+pub mod anim_editor;
 pub mod asset_manager;
 pub mod plugin_store;
 pub mod toolbox;

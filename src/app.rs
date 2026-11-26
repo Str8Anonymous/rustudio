@@ -59,6 +59,8 @@ pub enum Tab {
     AvatarSettings,
     /// Studio's Terrain Editor (Home / View > Terrain Editor).
     TerrainEditor,
+    /// Studio's Animation Editor (Avatar > Clip Editor): src/anim_editor.
+    AnimationEditor,
     /// Studio's Toolbox (Home / View > Toolbox): src/toolbox.
     Toolbox,
     /// Studio's Asset Manager (Home > Assets, Window > Asset Manager): src/asset_manager.
@@ -84,6 +86,7 @@ impl Tab {
             Tab::Output => "Output",
             Tab::AvatarSettings => "Avatar Settings",
             Tab::TerrainEditor => "Terrain Editor",
+            Tab::AnimationEditor => "Animation Editor",
             Tab::Toolbox => "Toolbox",
             Tab::AssetManager => "Asset Manager",
             Tab::FileSync => "File Sync",
@@ -130,6 +133,64 @@ pub struct Harness {
     pub plugin_dirs: Vec<PathBuf>,
     pub no_plugins: bool,
     pub plugins_started: bool,
+}
+
+#[cfg(test)]
+impl Harness {
+    pub fn test_empty() -> Self {
+        Self {
+            run: RunHarness {
+                shot_after: None,
+                log_out: None,
+                input: crate::run_harness::HarnessInput {
+                    actions: Vec::new(),
+                    pointer: None,
+                    shift: false,
+                },
+                started: rustudio_core::sim_clock::now(),
+                held: 0.0,
+                screenshot: None,
+                screenshot_requested: false,
+                start_play: false,
+                camera: None,
+                shots: Vec::new(),
+                shot_next: 0,
+                shot_lines: Vec::new(),
+                from_play: false,
+                play_started: None,
+                play_game_time: None,
+                frame_ms: Vec::new(),
+                last_frame: None,
+                no_ui: true,
+                no_render: true,
+                show_core_gui: false,
+                show_core_gui_explicit: false,
+                end_after: None,
+                fail_on_error: false,
+                result: None,
+                end_value: None,
+                run_frames: Vec::new(),
+                run_last: None,
+                run_playing: false,
+                finished: false,
+                bench: None,
+                profile: None,
+            },
+            selftest: None,
+            ui_shots: None,
+            open_roblox: None,
+            team_create: None,
+            roblox_picker: None,
+            roblox_settings: false,
+            ui_due: Vec::new(),
+            overlays: false,
+            plugin_files: Vec::new(),
+            installed_plugins: Vec::new(),
+            plugin_dirs: Vec::new(),
+            no_plugins: true,
+            plugins_started: false,
+        }
+    }
 }
 
 use crate::game::Game;
@@ -207,6 +268,8 @@ pub struct Editor {
     pub file_sync: crate::file_sync::FileSync,
     /// The Terrain Editor's tools and settings.
     pub terrain_ed: crate::terrain_editor::TerrainEditor,
+    /// The Animation Editor's state (src/anim_editor).
+    pub anim_editor: crate::anim_editor::AnimationEditor,
     /// The Toolbox panel's state (src/toolbox), kept while it is hidden.
     pub toolbox: crate::toolbox::Toolbox,
     /// The Asset Manager panel's state (src/asset_manager), kept while hidden.
@@ -321,6 +384,7 @@ fn native_tab_enabled(tab: Tab, choices: rustudio_core::rustudio_settings::Built
     match tab {
         Tab::Toolbox => choices.use_native(BuiltinTool::Toolbox),
         Tab::TerrainEditor => choices.use_native(BuiltinTool::TerrainEditor),
+        Tab::AnimationEditor => choices.use_native(BuiltinTool::AnimationEditor),
         _ => true,
     }
 }
@@ -330,7 +394,7 @@ fn strip_disabled_native_tabs(
     panels: &mut crate::panels::Panels,
     choices: rustudio_core::rustudio_settings::BuiltinToolChoices,
 ) {
-    for tab in [Tab::Toolbox, Tab::TerrainEditor] {
+    for tab in [Tab::Toolbox, Tab::TerrainEditor, Tab::AnimationEditor] {
         if !native_tab_enabled(tab, choices) {
             panels.take(dock, &tab);
         }
@@ -414,6 +478,7 @@ impl RustudioApp {
             mcp: Default::default(),
             file_sync: Default::default(),
             terrain_ed: Default::default(),
+            anim_editor: Default::default(),
             toolbox: Default::default(),
             asset_manager: Default::default(),
             profiler: None,
@@ -593,7 +658,7 @@ impl Editor {
     pub fn push_log(&mut self, level: Level, text: impl Into<String>) {
         let text = text.into();
         match level {
-            Level::Info => log::info!(target: "rustudio::editor", "{text}"),
+            Level::Info | Level::System => log::info!(target: "rustudio::editor", "{text}"),
             Level::Warn => log::warn!(target: "rustudio::editor", "{text}"),
             Level::Error => log::error!(target: "rustudio::editor", "{text}"),
         }
@@ -603,6 +668,11 @@ impl Editor {
 
     pub fn info(&mut self, text: impl Into<String>) {
         self.push_log(Level::Info, text);
+    }
+
+    /// Studio's purple `MESSAGE_SYSTEM` Output line (save / publish / system notices).
+    pub fn system(&mut self, text: impl Into<String>) {
+        self.push_log(Level::System, text);
     }
 
     pub(crate) fn flush_output_changes(&mut self) {
@@ -673,6 +743,7 @@ impl Editor {
                 crate::plugin_store::watcher::Level::Info => Level::Info,
                 crate::plugin_store::watcher::Level::Warn => Level::Warn,
                 crate::plugin_store::watcher::Level::Error => Level::Error,
+                crate::plugin_store::watcher::Level::System => Level::System,
             };
             self.push_log(level, l.text);
         }
@@ -889,7 +960,7 @@ impl Editor {
         let place = st.place.clone();
         self.project = Some(st);
         match (dirty, place) {
-            (false, _) => self.info("Saved: every synced file is up to date; nothing outside them changed"),
+            (false, _) => self.system("No changes to the place detected. Did not save."),
             (true, Some(p)) => {
                 self.save_to(p);
                 if let Some(st) = self.project.as_mut() {
@@ -925,7 +996,7 @@ impl Editor {
             Purpose::SaveAs => self.save_to(path),
             Purpose::InsertModel => self.insert_model_file(path),
             Purpose::SaveSelection(sel) => match self.game.doc.save_selection_to(&sel, &path) {
-                Ok(()) => self.info(format!("Saved selection to {}", path.display())),
+                Ok(()) => self.system(format!("Saved to '{}'", path.display())),
                 Err(e) => self.error(format!("Save failed: {e}")),
             },
             Purpose::SaveLocalPlugin(sel) => {
@@ -933,6 +1004,9 @@ impl Editor {
                 self.save_local_plugin_to(path);
             }
             Purpose::TerrainImage { height } => self.load_import_image(path, height),
+            Purpose::AnimImportFbx | Purpose::AnimImportRbxm | Purpose::AnimExportRbxm => {
+                self.anim_editor_handle_file(&purpose, path)
+            }
             Purpose::FileSyncProject => self.file_sync.pick = path.display().to_string(),
             Purpose::ProjectParent => {
                 if let Some(d) = self.project_export.as_mut() {
@@ -995,7 +1069,7 @@ impl Editor {
 
     pub fn save_to(&mut self, p: PathBuf) {
         match self.game.doc.save_to(&p) {
-            Ok(()) => self.info(format!("Saved {}", p.display())),
+            Ok(()) => self.system(format!("Saved to '{}'", p.display())),
             Err(e) => self.error(format!("Save failed: {e}")),
         }
     }
@@ -1857,6 +1931,7 @@ impl TabViewer for Viewer<'_> {
             Tab::Output => self.ed.output_ui(ui),
             Tab::AvatarSettings => self.ed.avatar_settings_ui(ui),
             Tab::TerrainEditor => self.ed.terrain_editor_ui(ui),
+            Tab::AnimationEditor => self.ed.anim_editor_ui(ui),
             Tab::Plugin(n) => self.ed.plugin_widget_ui(ui, *n),
             Tab::Toolbox => self.ed.toolbox_ui(ui),
             Tab::AssetManager => self.ed.asset_manager_ui(ui),
@@ -2631,6 +2706,7 @@ impl RustudioApp {
             (Tab::Output, "Output"),
             (Tab::AvatarSettings, "Avatar Settings"),
             (Tab::TerrainEditor, "Terrain Editor"),
+            (Tab::AnimationEditor, "Animation Editor"),
             (Tab::Toolbox, "Toolbox"),
             (Tab::AssetManager, "Asset Manager"),
             (Tab::FileSync, "File Sync"),
@@ -2644,6 +2720,8 @@ impl RustudioApp {
         if self.ed.profiler.is_some() && !self.ed.ui.panels_open.contains("MicroProfiler") {
             self.ed.profiler = None;
         }
+        self.ed.anim_editor_check_closed();
+        self.ed.anim_editor_sync_selection();
         let ed = &mut self.ed;
         ed.open_script_tabs(&mut self.dock, &mut self.panels);
         crate::panels::record_homes(&self.dock, &mut self.panels.homes);

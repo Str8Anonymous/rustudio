@@ -10,6 +10,8 @@ use egui::{Color32, FontId, RichText, Stroke};
 use rbx_dom_weak::types::{Ref, Variant};
 
 use crate::app::Editor;
+
+mod indent;
 use crate::icons;
 use rustudio_engine::runtime;
 use rustudio_engine::theme;
@@ -373,6 +375,14 @@ impl Editor {
         ui.painter().rect_filled(ui.available_rect_before_wrap(), 0.0, bg);
         let error_line = buf.error.as_ref().map(|e| e.0);
         let mut changed = false;
+        // Studio's auto-indent: Enter (and typing `end`/`else`/`}`...) run
+        // ahead of egui, which would put a bare "\n" (script_editor/indent.rs).
+        let indented = focused
+            && indent::handle_keys(ui.ctx(), editor_id, &mut buf.text, &indent::Cfg::from_settings());
+        if indented {
+            changed = true;
+            buf.edited = Instant::now();
+        }
         egui::ScrollArea::both()
             .auto_shrink([false, false])
             .id_salt(("script_scroll", r))
@@ -418,16 +428,23 @@ impl Editor {
                         }
                         ui.fonts_mut(|f| f.layout_job(job))
                     };
-                    let resp = ui.add(
-                        egui::TextEdit::multiline(&mut buf.text)
-                            .id(editor_id)
-                            .code_editor()
-                            .frame(egui::Frame::NONE)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(lines.max(24))
-                            .lock_focus(true)
-                            .layouter(&mut layouter),
-                    );
+                    let out = egui::TextEdit::multiline(&mut buf.text)
+                        .id(editor_id)
+                        .code_editor()
+                        .frame(egui::Frame::NONE)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(lines.max(24))
+                        .lock_focus(true)
+                        .layouter(&mut layouter)
+                        .show(ui);
+                    let resp = out.response.response;
+                    if indented {
+                        // (egui only follows the cursor for its own edits)
+                        if let Some(c) = out.cursor_range {
+                            let at = out.galley.pos_from_cursor(c.primary).translate(out.galley_pos.to_vec2());
+                            ui.scroll_to_rect(at, None);
+                        }
+                    }
                     if resp.changed() {
                         changed = true;
                         buf.edited = Instant::now();

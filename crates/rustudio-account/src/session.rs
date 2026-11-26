@@ -464,7 +464,7 @@ pub struct Session {
     cookie: Arc<Mutex<Cookie>>,
     agent: ureq::Agent,
     /// X-CSRF-TOKEN from the last 403, reused until the session rotates it.
-    csrf: Mutex<Option<String>>,
+    csrf: Arc<Mutex<Option<String>>>,
     /// Store a rotation where `load_cookie` finds it. Off for
     /// [`Session::unchecked`]: a mock server's `Set-Cookie` must never
     /// replace the person's stored session.
@@ -586,20 +586,19 @@ impl Session {
         Ok(Session {
             cookie: Arc::new(Mutex::new(cookie)),
             agent,
-            csrf: Mutex::new(None),
+            csrf: Arc::new(Mutex::new(None)),
             persist: true,
             profile,
         })
     }
 
-    /// A copy for downloads on other threads, so they don't queue on the
-    /// account's lock (it shares the connection pool; no CSRF token).
-    /// The cookie is shared, so a rotation seen by one copy is seen by all.
+    /// A copy for background threads, so they don't queue on the account's
+    /// lock (shares the connection pool, cookie rotation, and CSRF token).
     pub fn downloader(&self) -> Session {
         Session {
             cookie: self.cookie.clone(),
             agent: self.agent.clone(),
-            csrf: Mutex::new(None),
+            csrf: self.csrf.clone(),
             persist: self.persist,
             profile: self.profile.clone(),
         }
@@ -619,7 +618,7 @@ impl Session {
         Session {
             cookie: Arc::new(Mutex::new(cookie)),
             agent: session_agent(),
-            csrf: Mutex::new(None),
+            csrf: Arc::new(Mutex::new(None)),
             persist: false,
             profile,
         }
