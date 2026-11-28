@@ -434,6 +434,10 @@ pub struct PlaySession {
     /// Joystick devices seen (sorted names; slot i = Enum.UserInputType.Gamepad(i+1))
     /// and when they were last scanned.
     gamepads: crate::gamepad::Gamepads,
+    /// The Device Simulator's virtual controller (keys as a gamepad) and
+    /// the gamepad input it made since the last gamepad poll.
+    pub(crate) virtual_pad: crate::virtual_pad::VirtualPad,
+    pad_inputs: Vec<crate::gamepad::Input>,
     /// When the instance collector last ran (`collect_garbage`), and parts the
     /// engine itself took out of the tree (fallen) for it to free.
     gc_at: f64,
@@ -512,6 +516,8 @@ impl PlaySession {
             keys_processed: HashSet::new(),
             window_focused: true,
             gamepads: Default::default(),
+            virtual_pad: Default::default(),
+            pad_inputs: Vec::new(),
             gc_at: 0.0,
             engine_orphans: Vec::new(),
             memstats_at: 0.0,
@@ -3049,9 +3055,9 @@ impl Game {
             }
             k
         };
-        let keys: HashSet<String> = if typing { HashSet::new() } else { raw_keys.clone() };
+        let mut keys: HashSet<String> = if typing { HashSet::new() } else { raw_keys.clone() };
         // (name, gameProcessedEvent)
-        let (began, ended): (Vec<(String, bool)>, Vec<(String, bool)>) = {
+        let (mut began, mut ended): (Vec<(String, bool)>, Vec<(String, bool)>) = {
             let s = self.play.as_mut().expect("playing");
             let mut b: Vec<(String, bool)> = raw_keys
                 .difference(&s.keys_prev)
@@ -3107,6 +3113,14 @@ impl Game {
             s.keys_prev = raw_keys;
             (b, e)
         };
+        // The virtual controller turns its keys into gamepad input; the
+        // keyboard hears none of them (nor any other key) while it's on.
+        let controller = self.controller_on;
+        if let Some(s) = self.play.as_mut() {
+            s.virtual_pad.set_on(controller);
+            let pad = s.virtual_pad.take(&mut keys, &mut began, &mut ended, textbox);
+            s.pad_inputs.extend(pad);
+        }
         if !typing && began.iter().any(|(key, processed)| {
             !processed && matches!(key.as_str(), "W" | "A" | "S" | "D" | "Up" | "Down" | "Space")
         }) {
@@ -3818,16 +3832,32 @@ impl Game {
             });
             let accepts_gamepad = focused_now && self.play_game_input() && !menu_open;
             // A simulated console, headset or TV holds a gamepad slot of its own.
-            let device_pad = self.device.as_ref().is_some_and(|v| v.device.native_gamepad());
-            let virtual_pad = self
-                .play
-                .as_mut()
-                .and_then(|s| s.gamepads.reserve(device_pad))
-                .map(|slot| slot as u8);
+            // So does the virtual controller while it's on.
+            let device_pad = self.device.as_ref().is_some_and(|v| v.device.native_gamepad()) || self.controller_on;
+            let virtual_pad = self.play.as_mut().and_then(|s| {
+                let slot = s.gamepads.reserve(device_pad);
+                s.virtual_pad.slot = slot;
+                slot.map(|slot| slot as u8)
+            });
             let gamepads = self
                 .play
                 .as_mut()
-                .map(|s| s.gamepads.poll(accepts_gamepad))
+                .map(|s| {
+                    let mut frame = s.gamepads.poll(accepts_gamepad);
+                    let pad = std::mem::take(&mut s.pad_inputs);
+                    if accepts_gamepad {
+                        frame.inputs.extend(pad);
+                    } else {
+                        // Not heard now (window unfocused, menu, server
+                        // view): its releases still arrive and the rest lets
+                        // go, as a real pad's do (poll above), so no stick
+                        // stays pushed.
+                        frame.inputs.extend(pad.into_iter().filter(|i| i.state == "End" || (i.state == "Change" && i.position == glam::Vec3::ZERO)));
+                        frame.inputs.extend(s.virtual_pad.release_all());
+                    }
+                    s.virtual_pad.heard = accepts_gamepad;
+                    frame
+                })
                 .unwrap_or_default();
             // Moving parts' velocities on the client, its own character's too.
             let client_velocities: rustc_hash::FxHashMap<Ref, Vec3> = {
@@ -3964,14 +3994,6 @@ impl Game {
                 // screen-sized GUIs).
                 {
                     let _s = rustudio_core::bench::scope("p6b_layout_changes");
-                    let _ = rustudio_engine::runtime::ext::fire_device_changes(&rt.lua);
-                    let _ = rustudio_engine::runtime::ext::fire_layout_changes(&rt.lua);
-                }
-                // GuiService.MenuOpened / MenuClosed (the Esc menu).
-                if let Some(gs) = gui_service {
-                    for open in &menu_events {
-                        rt.fire(gs, if *open { "MenuOpened" } else { "MenuClosed" }, vec![]);
-                    }
                     // (a host pad moved out of Gamepad1 for the simulated
                     // pad goes first: it reappears in its new slot below)
                     if let Some(uis) = cuis.filter(|_| gamepads.vacated != 0) {
@@ -3981,6 +4003,14 @@ impl Game {
                                 .unwrap_or(Value::Nil);
                             rt.fire(uis, "GamepadDisconnected", vec![pad]);
                         }
+                    }
+                    let _ = rustudio_engine::runtime::ext::fire_device_changes(&rt.lua);
+                    let _ = rustudio_engine::runtime::ext::fire_layout_changes(&rt.lua);
+                }
+                // GuiService.MenuOpened / MenuClosed (the Esc menu).
+                if let Some(gs) = gui_service {
+                    for open in &menu_events {
+                        rt.fire(gs, if *open { "MenuOpened" } else { "MenuClosed" }, vec![]);
                     }
                 }
                 // Input reaches ContextActionService's bound actions, then
@@ -4137,7 +4167,7 @@ impl Game {
                         input.state,
                         &format!("Gamepad{}", input.slot + 1),
                         input.key,
-                        (f64::from(input.position.x), f64::from(input.position.y), 0.0),
+                        (f64::from(input.position.x), f64::from(input.position.y), f64::from(input.position.z)),
                         (f64::from(input.delta.x), f64::from(input.delta.y)),
                         false,
                     );
@@ -4946,6 +4976,245 @@ mod client_start_order_tests {
         for _ in 0..n {
             game.play_tick(&ctx, 1.0 / 60.0, &mut (), true, false);
         }
+    }
+
+    /// A Play on a phone (or Current device) with a client logger of
+    /// gamepad events and flags in `_G.log`.
+    fn pad_game(device: Option<&str>) -> Game {
+        let mut game = Game::new(None);
+        let root = game.doc.dom.root_ref();
+        let rf = game.doc.find_child(root, "ReplicatedFirst")
+            .unwrap_or_else(|| game.doc.dom.insert(root, InstanceBuilder::new("ReplicatedFirst").with_name("ReplicatedFirst")));
+        game.doc.dom.insert(rf, InstanceBuilder::new("LocalScript").with_property("Source", r#"
+            local U = game:GetService("UserInputService")
+            _G.log = {}
+            local function log(s) table.insert(_G.log, s) end
+            for _, n in {"InputBegan", "InputChanged", "InputEnded"} do
+                U[n]:Connect(function(io)
+                    if io.UserInputType.Name:sub(1, 7) == "Gamepad" or io.UserInputType == Enum.UserInputType.Keyboard then
+                        log(string.format("%s %s %s %d,%d,%d", n, io.UserInputType.Name, io.KeyCode.Name, io.Position.X, io.Position.Y, io.Position.Z))
+                    end
+                end)
+            end
+            U.GamepadConnected:Connect(function(g) log("GamepadConnected " .. g.Name) end)
+            U.GamepadDisconnected:Connect(function(g) log("GamepadDisconnected " .. g.Name) end)
+            for _, p in {"GamepadEnabled", "PreferredInput"} do
+                U:GetPropertyChangedSignal(p):Connect(function() log(p .. "=" .. tostring(U[p])) end)
+            end
+        "#.to_string()));
+        if let Some(id) = device {
+            let panel = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1914.0, 718.0));
+            let d = rustudio_core::devices::preset(id).unwrap();
+            let view = crate::device_view::DeviceView::layout(panel, d, rustudio_core::devices::Orientation::Landscape,
+                crate::device_view::Scaling::FitToWindow, rustudio_core::devices::Insets::default(), 96.0, 1.0);
+            game.viewport_rect = view.screen_win;
+            game.device = Some(view);
+        } else {
+            game.viewport_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0));
+        }
+        game.start_play(RunMode::Play, &mut (), false, None);
+        // (no host pads: one plugged into the test machine would take Gamepad1)
+        game.play.as_mut().unwrap().gamepads = Default::default();
+        tick(&mut game, 30);
+        game
+    }
+
+    /// Runs Luau on the client that leaves a string in `_G.out`; returns it
+    /// (passed back as the chunk's error: run_luau returns only errors).
+    fn client_string(game: &mut Game, code: &str) -> String {
+        let e = game.run_luau(Side::Client, &format!("{code}\nerror('OUT[' .. tostring(_G.out) .. ']', 0)")).unwrap_or_default();
+        let at = e.find("OUT[").unwrap_or_else(|| panic!("{e}"));
+        let rest = &e[at + 4..];
+        rest[..rest.rfind(']').unwrap()].to_string()
+    }
+
+    fn pad_log(game: &mut Game) -> Vec<String> {
+        let s = client_string(game, "_G.out = table.concat(_G.log, '|') _G.log = {}");
+        s.split('|').filter(|l| !l.is_empty()).map(String::from).collect()
+    }
+
+    fn client_flags(game: &mut Game) -> String {
+        client_string(game, r#"
+            local U = game:GetService("UserInputService")
+            _G.out = string.format("%s %s %s %s %s", tostring(U.TouchEnabled), tostring(U.KeyboardEnabled), tostring(U.MouseEnabled), tostring(U.GamepadEnabled), U.PreferredInput.Name)
+        "#)
+    }
+
+    fn press(game: &mut Game, key: egui::Key, down: bool) {
+        game.phys.ingest(&egui::RawInput {
+            events: vec![egui::Event::Key { key, physical_key: Some(key), pressed: down, repeat: false, modifiers: Default::default() }],
+            ..Default::default()
+        });
+    }
+
+    /// Ticks with the window focused (gamepads are heard only then).
+    fn ptick(game: &mut Game, n: usize) {
+        let ctx = egui::Context::default();
+        for _ in 0..n {
+            ctx.begin_pass(egui::RawInput { focused: true, ..Default::default() });
+            game.play_tick(&ctx, 1.0 / 60.0, &mut (), true, false);
+            let _ = ctx.end_pass();
+        }
+    }
+
+    /// Opening the Controller Emulator on a phone (measured in Studio):
+    /// GamepadEnabled and Gamepad1 at once, PreferredInput still Touch.
+    #[test]
+    fn controller_connects_gamepad1_at_once() {
+        let mut game = pad_game(Some("iphone_14"));
+        pad_log(&mut game);
+        game.controller_on = true;
+        ptick(&mut game, 3);
+        assert_eq!(pad_log(&mut game), ["GamepadEnabled=true", "GamepadConnected Gamepad1"]);
+        assert_eq!(client_flags(&mut game), "true false false true Touch");
+    }
+
+    /// The first mapped key: PreferredInput Gamepad, then the stick moves;
+    /// the keyboard hears nothing (measured).
+    #[test]
+    fn first_mapped_key_prefers_gamepad() {
+        let mut game = pad_game(Some("iphone_14"));
+        game.controller_on = true;
+        ptick(&mut game, 3);
+        pad_log(&mut game);
+        press(&mut game, egui::Key::W, true);
+        ptick(&mut game, 2);
+        press(&mut game, egui::Key::W, false);
+        ptick(&mut game, 2);
+        press(&mut game, egui::Key::Num9, true);
+        ptick(&mut game, 2);
+        press(&mut game, egui::Key::Num9, false);
+        ptick(&mut game, 2);
+        assert_eq!(
+            pad_log(&mut game),
+            [
+                "PreferredInput=Enum.PreferredInput.Gamepad",
+                "InputChanged Gamepad1 Thumbstick1 0,1,0",
+                "InputEnded Gamepad1 Thumbstick1 0,0,0",
+                "InputBegan Gamepad1 ButtonA 0,0,1",
+                "InputEnded Gamepad1 ButtonA 0,0,0",
+            ]
+        );
+        assert_eq!(client_flags(&mut game), "true false false true Gamepad");
+    }
+
+    /// Closing the panel gives the phone back its own input (measured).
+    #[test]
+    fn closing_restores_the_device() {
+        let mut game = pad_game(Some("iphone_14"));
+        game.controller_on = true;
+        ptick(&mut game, 3);
+        press(&mut game, egui::Key::W, true);
+        ptick(&mut game, 2);
+        pad_log(&mut game);
+        game.controller_on = false;
+        ptick(&mut game, 3);
+        let log = pad_log(&mut game);
+        assert_eq!(log[..3], ["GamepadEnabled=false", "PreferredInput=Enum.PreferredInput.Touch", "GamepadDisconnected Gamepad1"], "{log:?}");
+        assert!(!log.iter().any(|l| l.contains("Thumbstick")), "{log:?}");
+        assert_eq!(client_flags(&mut game), "true false false false Touch");
+    }
+
+    /// Holding W, then the window loses focus: the stick lets go once
+    /// (a real pad's releases arrive the same way), and comes back with
+    /// focus while W is still down.
+    #[test]
+    fn controller_lets_go_when_the_window_loses_focus() {
+        let mut game = pad_game(Some("iphone_14"));
+        game.controller_on = true;
+        ptick(&mut game, 3);
+        press(&mut game, egui::Key::W, true);
+        ptick(&mut game, 2);
+        pad_log(&mut game);
+        tick(&mut game, 4); // (unfocused)
+        assert_eq!(pad_log(&mut game), ["InputEnded Gamepad1 Thumbstick1 0,0,0"]);
+        ptick(&mut game, 2);
+        assert_eq!(pad_log(&mut game), ["InputChanged Gamepad1 Thumbstick1 0,1,0"]);
+    }
+
+    fn device_view(id: &str) -> crate::device_view::DeviceView {
+        let panel = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1914.0, 718.0));
+        crate::device_view::DeviceView::layout(panel, rustudio_core::devices::preset(id).unwrap(), rustudio_core::devices::Orientation::Landscape,
+            crate::device_view::Scaling::FitToWindow, rustudio_core::devices::Insets::default(), 96.0, 1.0)
+    }
+
+    /// A console with a mouse click, then a key (measured on Xbox One):
+    /// the click turns the keyboard and mouse on but keeps PreferredInput
+    /// Gamepad; a key makes it KeyboardAndMouse.
+    #[test]
+    fn mouse_and_keys_on_a_console() {
+        use rustudio_core::devices::Preferred;
+        let mut game = Game::new(None);
+        game.device = Some(device_view("xbox"));
+        let f = game.device_input().flags;
+        assert!(!f.keyboard && !f.mouse && f.gamepad && f.preferred == Preferred::Gamepad);
+        game.input_flip = crate::game::InputFlip::Mouse;
+        let d = game.device_input();
+        assert!(d.flip && d.flags.keyboard && d.flags.mouse && d.flags.gamepad && d.flags.preferred == Preferred::Gamepad);
+        game.input_flip = crate::game::InputFlip::Key;
+        assert_eq!(game.device_input().flags.preferred, Preferred::KeyboardAndMouse);
+    }
+
+    /// The left button is a finger only on a touch device without a mouse,
+    /// in Play on the client's view.
+    #[test]
+    fn left_drag_becomes_touch_not_mouse() {
+        let mut game = pad_game(Some("iphone_14"));
+        assert!(game.touch_mode());
+        game.device = Some(device_view("xbox"));
+        assert!(!game.touch_mode());
+        game.device = None;
+        assert!(!game.touch_mode());
+        game.device = Some(device_view("android_tv_1080"));
+        assert!(game.touch_mode());
+    }
+
+    /// LeftAlt (for a pinch) is keyboard input on a phone: it flips to
+    /// keyboard and mouse until the fingers come down (measured).
+    #[test]
+    fn left_alt_flips_a_phone_until_the_touch() {
+        let mut game = pad_game(Some("iphone_14"));
+        let ctx = egui::Context::default();
+        let mut keys = |game: &mut Game, modifiers: egui::Modifiers| {
+            ctx.begin_pass(egui::RawInput { events: vec![egui::Event::ModifiersChanged(modifiers)], focused: true, ..Default::default() });
+            game.game_keys(&ctx, true);
+            let _ = ctx.end_pass();
+        };
+        keys(&mut game, egui::Modifiers::NONE);
+        assert_eq!(game.input_flip, crate::game::InputFlip::None);
+        keys(&mut game, egui::Modifiers { alt: true, ..Default::default() });
+        assert_eq!(game.input_flip, crate::game::InputFlip::Key);
+        game.input_flip = crate::game::InputFlip::None; // (the touch began)
+        keys(&mut game, egui::Modifiers { alt: true, ..Default::default() });
+        assert_eq!(game.input_flip, crate::game::InputFlip::None, "held, not pressed again");
+    }
+
+    /// Android's back button opens Roblox's in-game menu with no key event
+    /// (measured: MenuOpened, nothing on InputBegan).
+    #[test]
+    fn android_back_opens_the_menu_without_a_key() {
+        let mut game = pad_game(Some("samsung_galaxy_a16"));
+        assert_eq!(game.run_luau(Side::Client, "game:GetService('GuiService').MenuOpened:Connect(function() table.insert(_G.log, 'MenuOpened') end)"), None);
+        pad_log(&mut game);
+        game.android_back();
+        ptick(&mut game, 5);
+        let log = pad_log(&mut game);
+        assert!(log.contains(&"MenuOpened".to_string()), "{log:?}");
+        assert!(!log.iter().any(|l| l.contains("Keyboard")), "{log:?}");
+    }
+
+    /// With no device simulated (Current device): desktop flags plus a pad.
+    #[test]
+    fn controller_with_current_device() {
+        let mut game = pad_game(None);
+        pad_log(&mut game);
+        game.controller_on = true;
+        ptick(&mut game, 3);
+        assert_eq!(pad_log(&mut game), ["GamepadEnabled=true", "GamepadConnected Gamepad1"]);
+        assert_eq!(client_flags(&mut game), "false true true true KeyboardAndMouse");
+        press(&mut game, egui::Key::D, true);
+        ptick(&mut game, 2);
+        assert_eq!(pad_log(&mut game), ["PreferredInput=Enum.PreferredInput.Gamepad", "InputChanged Gamepad1 Thumbstick1 1,0,0"]);
     }
 
     #[test]

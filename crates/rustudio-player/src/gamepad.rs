@@ -1,7 +1,7 @@
 //! Map host controllers to stable Roblox gamepad slots during Play.
 
 use gilrs::{Axis, Button, Gamepad, GamepadId, Gilrs};
-use glam::Vec2;
+use glam::{Vec2, Vec3};
 
 const BUTTONS: [(Button, &str); 16] = [
     (Button::South, "ButtonA"),
@@ -49,7 +49,9 @@ pub struct Input {
     pub slot: usize,
     pub key: &'static str,
     pub state: &'static str,
-    pub position: Vec2,
+    /// InputObject.Position: a stick's (x, y, 0); a button's Z is 1 while
+    /// it is down on the virtual controller (measured), 0 from host pads.
+    pub position: Vec3,
     pub delta: Vec2,
 }
 
@@ -186,7 +188,7 @@ impl State {
                     slot,
                     key,
                     state: if pressed { "Begin" } else { "End" },
-                    position: Vec2::ZERO,
+                    position: Vec3::ZERO,
                     delta: Vec2::ZERO,
                 });
             }
@@ -199,7 +201,7 @@ impl State {
                     slot,
                     key,
                     state: "Change",
-                    position,
+                    position: position.extend(0.0),
                     delta,
                 });
             }

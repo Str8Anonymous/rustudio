@@ -3,6 +3,7 @@
 //! person drives (Studio keeps them across sessions too).
 
 pub mod calibrate;
+pub mod controller;
 pub mod frames;
 pub mod manage;
 pub mod menus;
@@ -30,8 +31,10 @@ pub struct DeviceSim {
     /// The last device picked for each form button (Mobile, Desktop,
     /// Console, Headset).
     pub last_per_form: [Option<String>; 4],
-    /// The Controller Emulator is on.
+    /// The Controller Emulator is on (its panel is open): keys drive a gamepad.
     pub controller: bool,
+    /// The panel's layout as picked (None: the device's own).
+    pub pad_layout: Option<controller::PadLayout>,
     /// Custom devices and hidden Standard ones (Manage devices).
     pub custom: CustomDevices,
     /// A run a person drives: custom devices are read and written.
@@ -66,6 +69,7 @@ impl Default for DeviceSim {
             dpi: 96.0,
             last_per_form: Default::default(),
             controller: false,
+            pad_layout: None,
             custom: CustomDevices::default(),
             persist: false,
             popup: None,
@@ -145,6 +149,7 @@ impl DeviceSim {
 
     /// Picks a device (None = Current device). The orientation stays.
     pub fn select(&mut self, id: Option<&str>) {
+        self.pad_layout = None;
         let Some(id) = id else {
             self.device = None;
             return;
@@ -167,6 +172,13 @@ impl DeviceSim {
             FormButton::Headset => Some("meta_quest_3".into()),
         });
         self.select(id.as_deref());
+    }
+
+    /// The Virtual controller button: the controller (and its panel) on or
+    /// off. Returns the new state.
+    pub fn toggle_controller(&mut self) -> bool {
+        self.controller = !self.controller;
+        self.controller
     }
 
     pub fn rotate(&mut self) {
@@ -236,6 +248,13 @@ impl DeviceSim {
 }
 
 impl crate::app::Editor {
+    /// The Controller Emulator panel (a dock tab).
+    pub(crate) fn controller_emulator_ui(&mut self, ui: &mut egui::Ui) {
+        for a in controller::panel(ui, &self.device_sim) {
+            self.run_action(&a);
+        }
+    }
+
     /// The bar's popups and the simulator's dialogs, then the actions the
     /// bar and they asked for.
     pub(crate) fn device_sim_windows(&mut self, ctx: &egui::Context, panel: Rect, mut actions: Vec<String>) {
@@ -288,6 +307,19 @@ impl crate::app::Editor {
 
     /// The Device Simulator's actions (studio_actions.rs; --action).
     pub(crate) fn device_sim_action(&mut self, a: &str) -> bool {
+        if a == "device_controller" {
+            // The bar's Virtual controller button: opens or closes the
+            // Controller Emulator panel; open, the controller is on.
+            let on = self.device_sim.toggle_controller();
+            if !self.harness.run.no_ui {
+                self.ui.panel_requests.push((crate::app::Tab::ControllerEmulator, Some(on)));
+            }
+            return true;
+        }
+        if let Some(l) = a.strip_prefix("device_pad_layout:") {
+            self.device_sim.pad_layout = Some(if l == "xbox" { controller::PadLayout::Xbox } else { controller::PadLayout::GenericGamepad });
+            return true;
+        }
         let sim = &mut self.device_sim;
         match a {
             "device_simulator" => sim.shown = !sim.shown,
@@ -339,6 +371,24 @@ impl crate::app::Editor {
 mod tests {
     use super::*;
     use egui::{pos2, vec2};
+
+    #[test]
+    fn controller_toggle_follows_the_panel() {
+        use controller::PadLayout;
+        let mut s = DeviceSim { shown: true, ..Default::default() };
+        s.select(Some("iphone_14"));
+        assert!(s.toggle_controller());
+        assert_eq!(s.pad_layout(), PadLayout::GenericGamepad);
+        // a console shows the Xbox layout unless one was picked
+        s.select(Some("xbox"));
+        assert_eq!(s.pad_layout(), PadLayout::Xbox);
+        s.pad_layout = Some(PadLayout::GenericGamepad);
+        assert_eq!(s.pad_layout(), PadLayout::GenericGamepad);
+        s.select(Some("ps5"));
+        assert_eq!(s.pad_layout(), PadLayout::Xbox);
+        assert!(s.controller, "switching devices keeps it on");
+        assert!(!s.toggle_controller());
+    }
 
     #[test]
     fn device_sim_keeps_orientation_across_phones() {

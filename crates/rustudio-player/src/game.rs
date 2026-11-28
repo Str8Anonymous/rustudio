@@ -76,6 +76,9 @@ pub struct Game {
     /// The modifier keys last frame (LeftAlt, Shift and Ctrl count as keys
     /// for the flip above).
     pub(crate) mods_prev: egui::Modifiers,
+    /// The Device Simulator's virtual controller is on (its Controller
+    /// Emulator panel is open): keys drive a gamepad.
+    pub controller_on: bool,
     pub frame_no: u64,
     pub snap_move: bool,
     pub move_inc: f32,
@@ -188,6 +191,16 @@ impl Game {
                 d.flags.preferred = Preferred::KeyboardAndMouse;
             }
         }
+        // The virtual controller connects a gamepad at once; PreferredInput
+        // turns Gamepad with its first key, or at once on a device that
+        // already has one (the TV) (measured).
+        if self.controller_on {
+            let used = self.play.as_ref().is_some_and(|s| s.virtual_pad.used);
+            if used || d.flags.gamepad {
+                d.flags.preferred = Preferred::Gamepad;
+            }
+            d.flags.gamepad = true;
+        }
         d
     }
 
@@ -267,6 +280,7 @@ impl Game {
             touch_gpe: HashMap::new(),
             input_flip: InputFlip::None,
             mods_prev: egui::Modifiers::NONE,
+            controller_on: false,
             frame_no: 0,
             snap_move: mech::SNAP_ON_BY_DEFAULT,
             move_inc: mech::MOVE_SNAP,
@@ -420,11 +434,12 @@ impl Game {
             // until the next touch (measured in Studio's simulator), LeftAlt
             // too: pressing it for a pinch flips the phone to keyboard and
             // mouse until the fingers come down (measured).
+            // (The virtual controller takes every key while it's on.)
             let mods = ctx.input(|i| i.modifiers);
             let pressed = |on: bool, was: bool| on && !was;
             let mod_down = pressed(mods.alt, self.mods_prev.alt) || pressed(mods.shift, self.mods_prev.shift) || pressed(mods.ctrl, self.mods_prev.ctrl);
             self.mods_prev = mods;
-            if (!taps.is_empty() || mod_down) && self.device.as_ref().is_some_and(|v| !v.device.flags().keyboard) {
+            if (!taps.is_empty() || mod_down) && !self.controller_on && self.device.as_ref().is_some_and(|v| !v.device.flags().keyboard) {
                 self.input_flip = InputFlip::Key;
             }
             // The open menu takes the keys (R, L); the game hears none.
@@ -432,7 +447,7 @@ impl Game {
                 // (A focused TextBox has them: game-processed, Enter included.)
                 let processed = self.gui.focus.is_some();
                 if let Some(s) = self.play.as_mut() {
-                    if !processed && !core_scripts {
+                    if !processed && !core_scripts && !self.controller_on {
                         s.game.hotbar_taps.extend(taps.iter().copied());
                     }
                     s.game.key_taps.extend(taps.into_iter().map(|k| (k, processed)));

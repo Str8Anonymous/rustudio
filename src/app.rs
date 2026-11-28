@@ -67,6 +67,9 @@ pub enum Tab {
     AssetManager,
     /// File Sync (src/file_sync): the project attached to the place.
     FileSync,
+    /// The Device Simulator's Controller Emulator (src/device_sim/controller.rs):
+    /// open, the virtual controller is on.
+    ControllerEmulator,
     /// View > MicroProfiler (Ctrl+F6): the profiler window
     /// (crates/rustudio-profiler-ui), its own OS window by default.
     Profiler,
@@ -90,6 +93,7 @@ impl Tab {
             Tab::Toolbox => "Toolbox",
             Tab::AssetManager => "Asset Manager",
             Tab::FileSync => "File Sync",
+            Tab::ControllerEmulator => "Controller Emulator",
             Tab::Profiler => "MicroProfiler",
             Tab::Script(_) => "Script",
             Tab::Plugin(_) => "Plugin",
@@ -1959,6 +1963,7 @@ impl TabViewer for Viewer<'_> {
             Tab::Toolbox => self.ed.toolbox_ui(ui),
             Tab::AssetManager => self.ed.asset_manager_ui(ui),
             Tab::FileSync => self.ed.file_sync_panel_ui(ui),
+            Tab::ControllerEmulator => self.ed.controller_emulator_ui(ui),
             Tab::Profiler => {
                 let rect = ui.available_rect_before_wrap();
                 let mut c = ui.new_child(egui::UiBuilder::new().max_rect(rect));
@@ -2526,7 +2531,7 @@ impl RustudioApp {
             for t in popped {
                 if self.dock.find_tab(&t).is_none()
                     && native_tab_enabled(t, self.ed.builtin_tools)
-                    && !matches!(t, Tab::AvatarSettings | Tab::TerrainEditor | Tab::Toolbox | Tab::AssetManager | Tab::FileSync)
+                    && !matches!(t, Tab::AvatarSettings | Tab::TerrainEditor | Tab::Toolbox | Tab::AssetManager | Tab::FileSync | Tab::ControllerEmulator)
                 {
                     crate::panels::place(&mut self.dock, t, &self.panels.homes);
                 }
@@ -2733,12 +2738,16 @@ impl RustudioApp {
             (Tab::Toolbox, "Toolbox"),
             (Tab::AssetManager, "Asset Manager"),
             (Tab::FileSync, "File Sync"),
+            (Tab::ControllerEmulator, "Controller Emulator"),
             (Tab::Profiler, "MicroProfiler"),
         ]
         .into_iter()
         .filter(|(t, _)| self.panels.locate(&self.dock, t).is_some())
         .map(|(_, n)| n)
         .collect();
+        // The Controller Emulator's panel is the controller's switch (its
+        // tab's close button turns it off).
+        self.ed.device_sim.controller = self.ed.ui.panels_open.contains("Controller Emulator");
         // Closing the MicroProfiler stops recording.
         if self.ed.profiler.is_some() && !self.ed.ui.panels_open.contains("MicroProfiler") {
             self.ed.profiler = None;

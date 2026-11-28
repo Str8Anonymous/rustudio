@@ -521,6 +521,7 @@ impl Editor {
         self.game.view_panel = panel;
         let view_area = Rect::from_min_max(panel.min, egui::pos2(panel.max.x - mech::DEVICE_SCROLLBAR, panel.max.y));
         self.game.device = self.device_sim.view(view_area, ui.ctx().pixels_per_point());
+        self.game.controller_on = self.device_sim.controller;
         let frame_art = self.game.device.as_ref().and_then(|v| rustudio_core::devices::frame_art(&v.device.id));
         let rect = match &self.game.device {
             Some(v) => {

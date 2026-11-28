@@ -196,7 +196,7 @@ pub fn toolbar(ui: &mut egui::Ui, bar: Rect, sim: &DeviceSim, playing: bool, rec
                     // (Back is dim while editing: it opens the in-game menu)
                     BarButton::Back => ("devsim.back", "circle-chevron-left", "Mock Android back button", playing, false, "device_back"),
                     BarButton::Touch => ("devsim.touch", "hand-click", "Touch controls", true, sim.popup == Some(Popup::Touch), "device_popup:touch"),
-                    BarButton::Controller => ("devsim.controller", "rs-virtual-controller", "Virtual controller", false, sim.controller, "controller_emulator"),
+                    BarButton::Controller => ("devsim.controller", "rs-virtual-controller", "Virtual controller", true, sim.controller, "device_controller"),
                     _ => ("devsim.scaling", "adjustments-horizontal", "Display scaling", true, sim.popup == Some(Popup::Scaling), "device_popup:scaling"),
                 };
                 if icon_button(ui, r, key, icon, enabled, on, tip).clicked() {

@@ -449,6 +449,10 @@ rest was measured in Studio's Play with the simulator.
 | Long press while pinching | a LeftAlt + drag held 0.5 s is a TouchLongPress too, listing only the first (mirrored) touch, with Change on every move | measured |
 | Tap and swipe | a press that moves under 8 points is a tap (and pans only past it); a drag let go at 400 points/s or faster is a swipe | estimates |
 | Finger discs | about 46 points across while LeftAlt is held | measured |
+| Virtual controller keys | Studio's "Generic Gamepad" map: W A S D left stick (F L3), I J K L right stick (H R3), 1 2 3 4 d-pad up / left / down / right, 7 Y, 8 X, 9 A, 0 B, R L1, E L2, O R1, P R2, Q Select, U Start; the Xbox layout uses the same keys | Studio's Controller Emulator panel |
+| Virtual controller events | sticks: InputChanged at each axis −1 / 0 / 1 (W + D is (1, 1), not normalised), InputEnded at (0, 0, 0) on release, no InputBegan; buttons: InputBegan at (0, 0, 1), InputEnded at (0, 0, 0); L2 / R2: InputChanged then InputBegan at (0, 0, 1), InputChanged then InputEnded at (0, 0, 0); unmapped keys reach nothing | measured (iPhone 14, Play) |
+| Virtual controller flags | on: GamepadEnabled and Gamepad1 at once (a real pad in Gamepad1 moves to the next free slot: estimate); PreferredInput turns Gamepad with the first mapped key (at once on the TV, which has a pad of its own); off: the device's own flags and GamepadDisconnected | measured; with Current device, desktop flags plus the pad (estimate) |
+| Virtual controller exceptions | Escape still reaches the game (opens the in-game menu); a focused TextBox keeps every key | estimates |
 | Custom devices | a mobile device is a tablet from a 7 in diagonal; resolution scale PPI ÷ 160 rounded (1 on desktops and consoles); new devices' sizes other than a console's 1920 × 1080 at 96 PPI | estimates |
 
 ## FBX models (InsertService:LoadAsset)

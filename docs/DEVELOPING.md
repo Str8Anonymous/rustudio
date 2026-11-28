@@ -30,7 +30,8 @@ rustudio place.rbxl --play --from-play --shots 5 --screenshot t.png \
 # mid-run (device:ID, device:none, device_rotate, device_simulator,
 # device_form:mobile|desktop|console|headset, device_scaling:fit|actual|physical,
 # device_popup:devices|scaling|lan|quality|touch, device_calibrate, device_manage,
-# device_back); on a phone or tablet the left button is a finger, and
+# device_back, device_controller: the virtual controller, keys as a gamepad,
+# device_pad_layout:generic|xbox); on a phone or tablet the left button is a finger, and
 # --ldrag alt+X1,Y1>X2,Y2@S / alt+shift+… pinches / pans with two fingers:
 rustudio place.rbxl --play-only --window 1914x718 --device iphone_14 --portrait \
   --action device:xbox@8 --screenshot d.png --shot-after 10
@@ -102,6 +103,6 @@ Use `cargo check --workspace --all-targets` and `cargo test --workspace` to chec
 | `crates/rustudio-core/src/bench.rs` | frame-time measurement and the section timers |
 | `crates/rustudio-engine/src/gui.rs`, `crates/rustudio-engine/src/gui_walk.rs`, `crates/rustudio-engine/src/gui_input.rs` | GUIs: fonts, images, rich text; layout and drawing of one GUI; placing GUIs on screen / surfaces / billboards and the mouse and keyboard |
 | `crates/rustudio-core/src/fbx.rs` | binary FBX reader and the Roblox-style import for `LoadAsset` |
-| `crates/rustudio-core/src/devices.rs`, `crates/rustudio-player/src/device_view.rs`, `src/device_sim/` | the Device Simulator: Studio's devices and their input, where the device screen sits in the view, the editor's simulator state |
+| `crates/rustudio-core/src/devices.rs`, `crates/rustudio-player/src/device_view.rs`, `crates/rustudio-player/src/touch.rs`, `crates/rustudio-player/src/virtual_pad.rs`, `src/device_sim/` | the Device Simulator: Studio's devices and their input, where the device screen sits in the view, the mouse as a finger, the virtual controller's key map, the editor's simulator state and panels |
 | `crates/rustudio-account` | the Roblox session (cookie, keyring, CSRF), profile and avatar, experiences, downloads, publishing |
 

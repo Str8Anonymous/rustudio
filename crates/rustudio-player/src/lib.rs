@@ -15,6 +15,7 @@ pub mod play_teleport;
 pub mod touch;
 mod play_worker;
 mod gamepad;
+mod virtual_pad;
 pub mod player_app;
 pub mod profiler_counters;
 pub mod run_harness;

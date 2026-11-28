@@ -499,6 +499,7 @@ struct Input {
     viewport: Rect,
     device: Option<crate::device_view::DeviceView>,
     input_flip: crate::game::InputFlip,
+    controller_on: bool,
     editor_camera: Option<Camera>,
     frame_no: u64,
     profile_lua: bool,
@@ -534,6 +535,7 @@ impl Input {
             viewport: game.viewport_rect,
             device: game.device.clone(),
             input_flip: game.input_flip,
+            controller_on: game.controller_on,
             editor_camera: (s.showing == Side::Server).then(|| game.cam.clone()),
             frame_no: game.frame_no,
             profile_lua: rustudio_core::bench::lua_prof_on(),
@@ -565,6 +567,7 @@ impl Input {
         game.viewport_rect = self.viewport;
         game.device = self.device;
         game.input_flip = self.input_flip;
+        game.controller_on = self.controller_on;
         if let Some(camera) = self.editor_camera {
             game.cam = camera;
         }
@@ -867,7 +870,7 @@ impl Game {
         // The view and the simulated device as Play starts: client scripts
         // that start with it (the PlayerModule) read the device's input
         // before the first frame's input reaches the worker.
-        let (viewport_rect, device) = (self.viewport_rect, self.device.clone());
+        let (viewport_rect, device, input_flip, controller_on) = (self.viewport_rect, self.device.clone(), self.input_flip, self.controller_on);
         let teleport = self.teleport_to.take();
         if teleport.is_none() {
             self.play_origin = live_ids;
@@ -885,6 +888,8 @@ impl Game {
             game.fixed_dt = fixed_dt;
             game.viewport_rect = viewport_rect;
             game.device = device;
+            game.input_flip = input_flip;
+            game.controller_on = controller_on;
             game.start_play(mode, worker_host, false, live_ids);
         }) {
             Ok(worker) => worker,

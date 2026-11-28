@@ -91,6 +91,7 @@ Device Simulator):
 | Edit-mode ScreenGui insets and view size on a device | estimate: the edit view's GUIs keep covering the safe area; flags are the device's (measured) |
 | UserInputService TouchStarted / TouchMoved / TouchEnded, TouchTap, TouchTapInWorld, TouchLongPress, TouchPan, TouchSwipe, TouchPinch, TouchRotate; InputBegan / Changed / Ended with UserInputType Touch (UserInputService, bound actions and GuiObjects) | **done** (mouse-as-touch on a simulated phone or tablet): one InputObject per finger; Roblox's PlayerModule thumbstick and jump button work from it |
 | Input action system KeyCode TouchPosition (with a UIModifier), TouchDelta, TouchPinch | **done**: Roblox's Input Action System player scripts (Workspace.PlayerScriptsUseInputActionSystem) get their DynamicThumbstick, touch camera and pinch zoom from fingers; which fingers count and the pinch's units are estimates |
+| Virtual controller (Controller Emulator): gamepad InputBegan / Changed / Ended from keys, GamepadConnected / Disconnected, GamepadEnabled, PreferredInput Gamepad | **done**: Studio's key map and events; Roblox's PlayerModule walks and jumps from it |
 | GuiObject.TouchTap | open: not fired yet (GuiObjects get the Touch InputBegan / InputEnded and their buttons' MouseButton1Click / Activated) |
 
 ## Round 19: the whole corpus, and what was wrong rather than missing
