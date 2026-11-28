@@ -3775,6 +3775,9 @@ impl Game {
                     ),
                     None => Default::default(),
                 };
+            let touch_input = self.play.as_mut().map(|s| std::mem::take(&mut s.game.touch_input)).unwrap_or_default();
+            // (mouse-as-touch: no mouse motion or wheel reaches scripts)
+            let touch_mode = self.touch_mode();
             let server_buttons = gui_events.iter()
                 .filter(|event| matches!(event, GuiEvent::Fire(_, "MouseButton1Down" | "MouseButton1Click", _)))
                 .cloned()
@@ -4025,13 +4028,17 @@ impl Game {
                         );
                     }
                 };
+                // Fingers (mouse-as-touch) before the GUI's events, as a mouse press.
+                for (e, gpe) in &touch_input {
+                    fire_touch_event(rt, e, *gpe);
+                }
                 mouse_buttons(true);
                 game::fire_gui_events(rt, gui_events, gui_service);
                 game::step_smooth_scrolls(rt, dt);
                 if let Some(on) = window_focus_change {
                     rt.spawn_global("__rs_window_focus", vec![Value::Boolean(on)]);
                 }
-                if mouse_moved {
+                if mouse_moved && !touch_mode {
                     ev(
                         "Change",
                         "MouseMovement",
@@ -4041,7 +4048,7 @@ impl Game {
                         mouse_move_processed,
                     );
                 }
-                if wheel != 0.0 {
+                if wheel != 0.0 && !touch_mode {
                     ev(
                         "Change",
                         "MouseWheel",
@@ -4753,6 +4760,45 @@ impl Game {
     }
 }
 
+/// One mouse-as-touch event for the client's scripts (library.luau
+/// __rs_touch_event): positions as flat x, y lists.
+fn fire_touch_event(rt: &Runtime, e: &crate::touch::TouchEvent, gpe: bool) {
+    use crate::touch::{GestureState, TouchEvent as T};
+    let lua = &rt.lua;
+    let s = |x: &str| Value::String(lua.create_string(x).expect("lua string"));
+    let n = |x: f32| Value::Number(f64::from(x));
+    let list = |ps: &[egui::Pos2]| -> Value {
+        match lua.create_sequence_from(ps.iter().flat_map(|p| [f64::from(p.x), f64::from(p.y)])) {
+            Ok(t) => Value::Table(t),
+            Err(_) => Value::Nil,
+        }
+    };
+    let pair = |v: egui::Vec2| -> Value {
+        match lua.create_sequence_from([f64::from(v.x), f64::from(v.y)]) {
+            Ok(t) => Value::Table(t),
+            Err(_) => Value::Nil,
+        }
+    };
+    let st = |g: &GestureState| s(match g {
+        GestureState::Begin => "Begin",
+        GestureState::Change => "Change",
+        GestureState::End => "End",
+    });
+    let nil = Value::Nil;
+    let args = match e {
+        T::Began { id, pos } => vec![s("Began"), Value::Integer(*id as i64), n(pos.x), n(pos.y), n(0.0), n(0.0), Value::Boolean(gpe)],
+        T::Moved { id, pos, delta } => vec![s("Moved"), Value::Integer(*id as i64), n(pos.x), n(pos.y), n(delta.x), n(delta.y), Value::Boolean(gpe)],
+        T::Ended { id, pos } => vec![s("Ended"), Value::Integer(*id as i64), n(pos.x), n(pos.y), n(0.0), n(0.0), Value::Boolean(gpe)],
+        T::Tap { positions } => vec![s("Tap"), nil.clone(), nil.clone(), nil.clone(), nil.clone(), nil.clone(), Value::Boolean(gpe), list(positions)],
+        T::LongPress { positions, state } => vec![s("LongPress"), nil.clone(), nil.clone(), nil.clone(), nil.clone(), nil.clone(), Value::Boolean(gpe), list(positions), st(state)],
+        T::Pan { positions, translation, velocity, state } => vec![s("Pan"), nil.clone(), nil.clone(), nil.clone(), nil.clone(), nil.clone(), Value::Boolean(gpe), list(positions), pair(*translation), pair(*velocity), st(state)],
+        T::Swipe { direction, touches } => vec![s("Swipe"), nil.clone(), nil.clone(), nil.clone(), nil.clone(), nil.clone(), Value::Boolean(gpe), s(&format!("{direction:?}")), Value::Integer(*touches as i64)],
+        T::Pinch { positions, scale, velocity, state } => vec![s("Pinch"), nil.clone(), nil.clone(), nil.clone(), nil.clone(), nil.clone(), Value::Boolean(gpe), list(positions), n(*scale), n(*velocity), st(state)],
+        T::Rotate { positions, rotation, velocity, state } => vec![s("Rotate"), nil.clone(), nil.clone(), nil.clone(), nil.clone(), nil.clone(), Value::Boolean(gpe), list(positions), n(*rotation), n(*velocity), st(state)],
+    };
+    rt.spawn_global("__rs_touch_event", args);
+}
+
 #[cfg(test)]
 mod client_start_order_tests {
     use crate::game::Game;
@@ -4822,6 +4868,30 @@ mod client_start_order_tests {
             "#),
             None
         );
+    }
+
+    #[test]
+    fn touch_device_never_grabs_the_cursor() {
+        // a game in shift lock / first person (LockCenter) on a phone: the
+        // cursor stays free, so the bar and the frame stay reachable
+        let mut game = Game::new(None);
+        let panel = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1914.0, 718.0));
+        let d = rustudio_core::devices::preset("iphone_14").unwrap();
+        let view = crate::device_view::DeviceView::layout(panel, d, rustudio_core::devices::Orientation::Landscape,
+            crate::device_view::Scaling::FitToWindow, rustudio_core::devices::Insets::default(), 96.0, 1.0);
+        game.viewport_rect = view.screen_win;
+        game.device = Some(view);
+        game.start_play(RunMode::Play, &mut (), false, None);
+        tick(&mut game, 5);
+        assert!(game.touch_mode());
+        game.play.as_mut().unwrap().mouse_behavior = 1;
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let resp = ui.allocate_rect(ui.max_rect(), egui::Sense::click_and_drag());
+            game.update_game_mouse(ui.ctx(), &resp, egui::Vec2::ZERO, 0.0);
+        });
+        assert!(game.game_grab.is_none());
+        assert!(!game.cursor_log.iter().any(|c| c.starts_with("game-grab")), "{:?}", game.cursor_log);
     }
 
     /// A Play started with a device already chosen: the first client script

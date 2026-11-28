@@ -149,6 +149,7 @@ impl Harness {
                     actions: Vec::new(),
                     pointer: None,
                     shift: false,
+                    mods: egui::Modifiers::NONE,
                 },
                 started: rustudio_core::sim_clock::now(),
                 held: 0.0,

@@ -1865,6 +1865,7 @@ impl Gui {
     /// Whether a mouse wheel at screen point `p` lands on a GUI object that
     /// consumes scroll / pointer input (an Active/sink object, ScrollingFrame, or UIPageLayout).
     pub fn sinks_wheel_at(&self, p: Pos2) -> bool {
+        let p = self.pointer_map.map_or(p, |m| m * p);
         self.hits.iter().rev().any(|h| {
             (h.sink || h.scrolling || h.page_layout.is_some())
                 && point_in_quad(&h.quad, p)
@@ -1896,11 +1897,61 @@ impl Gui {
     }
 
     pub fn input(&mut self, ctx: &egui::Context, resp: &egui::Response, rect: Rect) -> bool {
-        // (a simulated device: window points to its points, where it was laid out)
+        let from = self.events.len();
+        let took = self.input_pointer(ctx, resp, rect);
+        if let Some(id) = self.touch_id {
+            self.as_touch(from, id);
+        }
+        took
+    }
+
+    /// Mouse-as-touch: this frame's mouse InputObjects become the finger's
+    /// (left button), hover-only and right-button / wheel input goes.
+    fn as_touch(&mut self, from: usize, id: u32) {
+        let events = self.events.split_off(from);
+        for ev in events {
+            let GuiEvent::Fire(r, name, args) = &ev else {
+                self.events.push(ev);
+                continue;
+            };
+            let input = args.iter().find_map(|a| match a {
+                GuiArg::Input { button, began, .. } => Some((*button, *began)),
+                _ => None,
+            });
+            // The finger's InputObject in place of the mouse's (Activated's
+            // too: buttons read its UserInputType), the other arguments kept.
+            let touch = |state: u8| {
+                let args = args
+                    .iter()
+                    .map(|a| match a {
+                        GuiArg::Input { x, y, .. } => GuiArg::Touch { id, state, x: *x, y: *y },
+                        other => other.clone(),
+                    })
+                    .collect();
+                Some(GuiEvent::Fire(*r, name, args))
+            };
+            let keep = match (input, *name) {
+                (None, "MouseButton2Down" | "MouseButton2Up" | "MouseButton2Click" | "MouseWheelForward" | "MouseWheelBackward") => None,
+                (None, _) => Some(ev.clone()),
+                (Some((1, _)), "InputBegan") => touch(0),
+                (Some((1, _)), "InputChanged") => touch(1),
+                (Some((1, began)), _) => touch(if began { 0 } else { 2 }),
+                (Some((0, _)), "InputChanged") => touch(1),
+                _ => None,
+            };
+            self.events.extend(keep);
+        }
+    }
+
+    fn input_pointer(&mut self, ctx: &egui::Context, resp: &egui::Response, rect: Rect) -> bool {
+        // (a simulated device: window points to its points, where it was laid
+        // out; a finger touches only while pressed: no hover)
         let map = self.pointer_map;
+        let touching = self.touch_id.is_none()
+            || ctx.input(|i| i.pointer.primary_down() || i.pointer.primary_released() || i.pointer.primary_pressed());
         let pointer = self.pointer_override.or(resp.hover_pos())
             .map(|p| map.map_or(p, |m| m * p))
-            .filter(|p| rect.contains(*p));
+            .filter(|p| rect.contains(*p) && touching);
         let under: Vec<Hit> = match pointer {
             Some(p) => self
                 .hits
@@ -2725,6 +2776,8 @@ impl Gui {
     /// clicked while editing). Empty transparent containers (a full-screen
     /// BackgroundTransparency=1 Frame holding a layout) are clicked through.
     pub fn object_at(&self, p: Pos2) -> Option<Ref> {
+        // (window points; a simulated device's GUI was laid out in its own)
+        let p = self.pointer_map.map_or(p, |m| m * p);
         self.hits
             .iter()
             .rev()

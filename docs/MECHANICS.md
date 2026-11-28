@@ -445,6 +445,10 @@ rest was measured in Studio's Play with the simulator.
 | Bar | 27 px tall; pills 22 px, fully rounded; icons 13 px, 20 px apart; the device dropdown 168 px wide, rows 17.5 px | measured (1:1 capture, and 1.5x captures divided by 1.5) |
 | Calibrate | an ID card 3.37 × 2.125 in; the slider runs 80 to 250 DPI, linear, default 96 | measured (the top end ±5) |
 | Manage devices limits | name ≤ 200 characters; width 1–7680, height 1–4320, pixel density 72–10000, keyboard heights 0–4320; memory at least 0.5 GB (raised silently) | measured (Studio's device service and dialog) |
+| Mouse as a finger | a still press of 0.5 s is a long press; LeftAlt + drag rotation begins past 0.1 rad and is reported in radians, not wrapped (Studio's emulator jumps past π); the second finger mirrors the pointer about the whole screen's centre | measured |
+| Long press while pinching | a LeftAlt + drag held 0.5 s is a TouchLongPress too, listing only the first (mirrored) touch, with Change on every move | measured |
+| Tap and swipe | a press that moves under 8 points is a tap (and pans only past it); a drag let go at 400 points/s or faster is a swipe | estimates |
+| Finger discs | about 46 points across while LeftAlt is held | measured |
 | Custom devices | a mobile device is a tablet from a 7 in diagonal; resolution scale PPI ÷ 160 rounded (1 on desktops and consoles); new devices' sizes other than a console's 1920 × 1080 at 96 PPI | estimates |
 
 ## FBX models (InsertService:LoadAsset)

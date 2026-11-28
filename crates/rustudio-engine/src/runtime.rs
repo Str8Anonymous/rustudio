@@ -256,6 +256,11 @@ pub struct World {
     pub device_seen: Option<ext::DeviceInput>,
     pub pad_seen: Option<u8>,
     pub orientation_due: bool,
+    /// MouseEnabled / KeyboardEnabled as last announced (Changed).
+    pub kbm_seen: Option<[bool; 2]>,
+    /// Since the last touch turned the keyboard flip off on this device,
+    /// MouseEnabled / KeyboardEnabled change silently.
+    pub kbm_quiet: bool,
     /// GUI instances with live connections or waiters.
     pub gui_listening: rustc_hash::FxHashSet<Ref>,
     pub layout_listening: rustc_hash::FxHashSet<Ref>,
@@ -776,6 +781,8 @@ impl World {
             device_seen: None,
             pad_seen: None,
             orientation_due: false,
+            kbm_seen: None,
+            kbm_quiet: false,
             gui_listening: Default::default(),
             layout_listening: Default::default(),
             listen_new: Default::default(),

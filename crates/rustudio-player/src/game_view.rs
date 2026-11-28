@@ -274,6 +274,10 @@ impl Game {
         let core_menu = self.show_core_gui && rustudio_engine::gui::share().core_menu_open;
         let menu = (self.show_core_gui && menu) || core_menu || ctx.memory(|m| m.top_modal_layer()).is_some();
         let (behavior, icon) = if menu { (0, true) } else { (behavior, icon) };
+        // A simulated touch device never takes the cursor (the bar and the
+        // frame stay reachable): touch has no mouse lock.
+        let touch = self.touch_mode();
+        let behavior = if touch { 0 } else { behavior };
         // A shown GuiButton.Modal lets go of the cursor too, unless the
         // right button is down (gui_modal.rs; asked only while the game
         // wants a lock).
@@ -412,7 +416,7 @@ impl Game {
         let hover_pos = resp.hover_pos();
         let wheel_sunk = menu || hover_pos.is_some_and(|p| self.gui.sinks_wheel_at(p));
         let move_sunk = menu || self.gui.pointer_over_sink();
-        if let Some(s) = self.play.as_mut() {
+        if let Some(s) = self.play.as_mut().filter(|_| !touch) {
             if !menu {
                 s.mouse_delta += glam::Vec2::new(d.x, d.y);
             }
@@ -2368,6 +2372,10 @@ impl Game {
         let device = self.device.clone();
         self.gui.device = device.as_ref().map(|v| rustudio_engine::gui::DeviceFrame { screen: v.screen_rect_dev(), scale: v.k });
         self.gui.pointer_map = device.as_ref().map(|v| v.pointer_transform());
+        // (mouse-as-touch: the GUI hears the pointer's finger)
+        let alt = ctx.input(|i| i.modifiers.alt);
+        self.gui.touch_id = self.touch_mode().then(|| self.touch.pointer_id(alt));
+        let fingers = if self.touch.two_fingers() && alt { self.touch.fingers() } else { Vec::new() };
         let (gui_rect, gui_painter) = match &device {
             Some(v) => {
                 // (device coordinates: the clip is moved with the shapes)
@@ -2412,6 +2420,15 @@ impl Game {
                     },
                 );
                 if let Some(v) = &device {
+                    // A disc per finger while LeftAlt is held (Rustudio's own
+                    // look for Studio's markers: about 46 points across).
+                    let o = egui::vec2(v.safe.left, v.safe.top + mech::GUI_TOP_INSET);
+                    let r = mech::TOUCH_MARKER_SIZE / 2.0;
+                    for f in &fingers {
+                        let c = *f + o;
+                        gui_painter.circle_filled(c, r, egui::Color32::from_rgba_unmultiplied(20, 20, 24, 140));
+                        gui_painter.circle_stroke(c, r - 1.5, egui::Stroke::new(3.0, egui::Color32::from_rgba_unmultiplied(220, 220, 225, 170)));
+                    }
                     let to = ctx.graphics_mut(|g| g.entry(layer).next_idx());
                     ctx.graphics_mut(|g| g.entry(layer).transform_range(shapes_from, to, v.gui_transform()));
                 }

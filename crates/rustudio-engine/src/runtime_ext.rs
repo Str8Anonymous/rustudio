@@ -56,6 +56,9 @@ pub struct DeviceInput {
     pub display_size: rustudio_core::devices::DisplaySize,
     /// A device is simulated (not Current device).
     pub simulated: bool,
+    /// A key (or a console's mouse) was used on a device without them: its
+    /// keyboard and mouse read as enabled until the next touch (measured).
+    pub flip: bool,
     /// Which device (a hash of its id; 0 with none): two devices can have
     /// the same screen.
     pub id: u64,
@@ -73,6 +76,7 @@ impl Default for DeviceInput {
             safe: [0.0; 4],
             display_size: rustudio_core::devices::DisplaySize::Medium,
             simulated: false,
+            flip: false,
             id: 0,
             own_pad: false,
         }
@@ -4763,17 +4767,34 @@ pub fn fire_device_changes(lua: &Lua) -> mlua::Result<()> {
         d.find_child(lp?, "PlayerGui")
     });
     let mut fires: Vec<(Ref, &'static str)> = Vec::new();
+    // MouseEnabled / KeyboardEnabled as scripts were last told: a key on a
+    // phone turns them on with Changed the first time only; the next touch
+    // turns them off silently (measured), and a later device switch reports
+    // against what was announced.
+    let announced = w.kbm_seen.unwrap_or([was.flags.mouse, was.flags.keyboard]);
+    let same_device = was.id == now.id && was.screen == now.screen && was.safe == now.safe && was.simulated == now.simulated;
     // One console (or other device with its own pad) for another, the pad
     // in the same slot: Studio drops it and plugs it back in, with
     // PreferredInput passing through KeyboardAndMouse (measured: Xbox to
     // PS4). Scripts read Gamepad in both Changed handlers (estimate: they
     // run after the frame's changes).
     let swap = pad_was.is_some() && pad_was == pad_now && was.own_pad && now.own_pad && was.id != now.id;
+    if !same_device {
+        w.kbm_quiet = false;
+    } else if was.flip && !now.flip {
+        w.kbm_quiet = true;
+    }
+    let quiet = w.kbm_quiet;
+    let mut kbm = announced;
     if let Some(u) = uis {
         let (a, b) = (was.flags, now.flags);
+        for (i, name, new) in [(0, "MouseEnabled", b.mouse), (1, "KeyboardEnabled", b.keyboard)] {
+            if !quiet && new != announced[i] {
+                kbm[i] = new;
+                fires.push((u, name));
+            }
+        }
         for (name, old, new) in [
-            ("MouseEnabled", a.mouse, b.mouse),
-            ("KeyboardEnabled", a.keyboard, b.keyboard),
             ("TouchEnabled", a.touch, b.touch),
             ("GamepadEnabled", a.gamepad, b.gamepad),
         ] {
@@ -4785,6 +4806,7 @@ pub fn fire_device_changes(lua: &Lua) -> mlua::Result<()> {
             fires.push((u, "PreferredInput"));
         }
     }
+    w.kbm_seen = Some(kbm);
     for (r, name) in &fires {
         let pname = Value::String(lua.create_string(name)?);
         w.fire(*r, "Changed", vec![pname]);
@@ -7391,6 +7413,7 @@ mod tests {
             safe: [s.left, s.top, s.right, s.bottom],
             display_size: d.display_size,
             simulated: true,
+            flip: false,
             id: {
                 use std::hash::{Hash, Hasher};
                 let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -7586,6 +7609,122 @@ mod tests {
         lua.load(r#"assert(#pads == 0, table.concat(pads, ", "))"#).exec().unwrap();
         frame("iphone_14", None);
         lua.load(r#"assert(table.concat(pads, ", ") == "PreferredInput=Touch, GamepadDisconnected Gamepad1", table.concat(pads, ", "))"#).exec().unwrap();
+    }
+
+    #[test]
+    fn touch_events_reach_scripts_in_order() {
+        // one InputObject for the finger's life; Input* then Touch* (Roblox docs)
+        let rt = device_client("iphone_14", false);
+        rt.lua.load(r#"
+            log = {}
+            local U = game:GetService("UserInputService")
+            local seen
+            for _, n in {"InputBegan", "TouchStarted", "InputChanged", "TouchMoved", "InputEnded", "TouchEnded"} do
+                U[n]:Connect(function(io)
+                    seen = seen or io
+                    assert(io == seen, n .. ": another InputObject")
+                    assert(io.UserInputType == Enum.UserInputType.Touch)
+                    table.insert(log, n .. "@" .. io.Position.X .. "," .. io.Position.Y)
+                end)
+            end
+            U.TouchTap:Connect(function(ps) table.insert(log, "TouchTap@" .. ps[1].X .. "," .. ps[1].Y) end)
+            U.TouchPinch:Connect(function(ps, scale, v, st) table.insert(log, "TouchPinch " .. st.Name .. " " .. #ps .. " " .. scale) end)
+            __rs_touch_event("Began", 1, 10, 20, 0, 0, false)
+            __rs_touch_event("Moved", 1, 12, 20, 2, 0, false)
+            __rs_touch_event("Ended", 1, 12, 20, 0, 0, false)
+            __rs_touch_event("Tap", nil, nil, nil, nil, nil, false, {12, 20})
+            __rs_touch_event("Pinch", nil, nil, nil, nil, nil, false, {1, 2, 3, 4}, 2, 0, "Begin")
+        "#).exec().unwrap();
+        rt.dispatch();
+        rt.lua.load(r#"
+            local want = "InputBegan@10,20 TouchStarted@10,20 InputChanged@12,20 TouchMoved@12,20 InputEnded@12,20 TouchEnded@12,20 TouchTap@12,20 TouchPinch Begin 2 2"
+            assert(table.concat(log, " ") == want, table.concat(log, " "))
+        "#).exec().unwrap();
+    }
+
+    #[test]
+    fn touch_keycodes_drive_input_actions() {
+        // Roblox's Input Action System player scripts (InputContexts.rbxp):
+        // the DynamicThumbstick's ViewportPosition action follows the finger
+        // that began on its UIModifier, (-1, -1) once it lifts; TouchDelta
+        // turns the camera with a free finger
+        let rt = device_client("iphone_14", false);
+        rt.lua.load(r#"
+            local ctx = Instance.new("InputContext")
+            ctx.Sink = true
+            ctx.Priority = 300
+            local thumb = Instance.new("InputAction", ctx)
+            thumb.Type = Enum.InputActionType.ViewportPosition
+            button = Instance.new("ImageButton")
+            local tb = Instance.new("InputBinding", thumb)
+            tb.KeyCode = Enum.KeyCode.TouchPosition
+            tb.UIModifier = button
+            local cam = Instance.new("InputContext")
+            local rot = Instance.new("InputAction", cam)
+            rot.Type = Enum.InputActionType.Direction2D
+            local rb = Instance.new("InputBinding", rot)
+            rb.KeyCode = Enum.KeyCode.TouchDelta
+            ctx.Parent = workspace
+            cam.Parent = workspace
+            seen, turns = {}, 0
+            thumb.StateChanged:Connect(function(v) table.insert(seen, v.X .. "," .. v.Y) end)
+            rot.StateChanged:Connect(function(v) if v.Magnitude > 0 then turns += 1 end end)
+        "#).exec().unwrap();
+        // (the GUI domain finds the new contexts as it steps)
+        rt.step(1.0 / 60.0);
+        rt.lua.load(r#"
+            __rs_touch_event("Began", 1, 10, 20, 0, 0, true)
+            __rs_touch_ui(button, __rs_touch_object(1))
+            __rs_touch_event("Moved", 1, 30, 20, 20, 0, true)
+            __rs_touch_event("Ended", 1, 30, 20, 0, 0, true)
+            __rs_touch_event("Began", 2, 300, 100, 0, 0, false)
+            __rs_touch_event("Moved", 2, 320, 100, 20, 0, false)
+            __rs_touch_event("Ended", 2, 320, 100, 0, 0, false)
+        "#).exec().unwrap();
+        rt.dispatch();
+        // (viewport positions start at the whole screen's corner: + (47, 58) on iPhone 14)
+        rt.lua.load(r#"
+            assert(table.concat(seen, " ") == "57,78 77,78 -1,-1", table.concat(seen, " "))
+            assert(turns == 1, "TouchDelta turns " .. turns)
+        "#).exec().unwrap();
+    }
+
+    #[test]
+    fn keyboard_on_a_phone_flips_to_keyboard_and_back() {
+        // measured (Studio, iPhone 14, Sessions 2-3): the first key announces
+        // Mouse / KeyboardEnabled; a touch turns them off silently; the next
+        // key announces only PreferredInput; a device switch reports against
+        // what was announced
+        let rt = device_client("iphone_14", false);
+        let lua = &rt.lua;
+        lua.load(r#"
+            log = {}
+            local U = game:GetService("UserInputService")
+            for _, p in {"MouseEnabled", "KeyboardEnabled", "PreferredInput"} do
+                U:GetPropertyChangedSignal(p):Connect(function() table.insert(log, p .. "=" .. tostring(U[p])) end)
+            end
+        "#).exec().unwrap();
+        let frame = |flip: bool, id: &str| {
+            set_device(&rt, Some(id), false);
+            if flip {
+                let mut w = world(lua).unwrap();
+                w.input.device.flip = true;
+                w.input.device.flags.keyboard = true;
+                w.input.device.flags.mouse = true;
+                w.input.device.flags.preferred = rustudio_core::devices::Preferred::KeyboardAndMouse;
+            }
+            fire_device_changes(lua).unwrap();
+            rt.dispatch();
+            let out: Vec<String> = lua.load("local l = log; log = {}; return l").eval().unwrap();
+            out.join(" ")
+        };
+        frame(false, "iphone_14");
+        assert_eq!(frame(true, "iphone_14"), "MouseEnabled=true KeyboardEnabled=true PreferredInput=Enum.PreferredInput.KeyboardAndMouse");
+        assert_eq!(frame(false, "iphone_14"), "PreferredInput=Enum.PreferredInput.Touch");
+        assert_eq!(frame(false, "iphone_14"), "");
+        assert_eq!(frame(true, "iphone_14"), "PreferredInput=Enum.PreferredInput.KeyboardAndMouse");
+        assert_eq!(frame(false, "iphone_14"), "PreferredInput=Enum.PreferredInput.Touch");
+        assert_eq!(frame(false, "ipad_10th_generation"), "MouseEnabled=false KeyboardEnabled=false");
     }
 
     #[test]

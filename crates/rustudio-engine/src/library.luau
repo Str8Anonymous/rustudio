@@ -1091,7 +1091,70 @@ function __rs_input_event(state, uit, key, x, y, z, dx, dy, gpe)
     end
     return sunk
 end
-function __rs_input_frame_end() mouse_delta = Vector2.zero end
+-- Mouse-as-touch on a simulated phone or tablet (crates/rustudio-player/src/touch.rs):
+-- one InputObject per finger for its whole life, shared by the GUI's and
+-- UserInputService's events (the PlayerModule's thumbstick keeps the one
+-- its frame's InputBegan gave it and watches TouchMoved / TouchEnded for it).
+local touch_objects = {}
+local touch_done = {}
+function __rs_touch_object(id, state, x, y, dx, dy)
+    local io = touch_objects[id]
+    if not io then
+        io = new_input_object({ UserInputType = Enum.UserInputType.Touch, KeyCode = keycode_unknown })
+        touch_objects[id] = io
+    end
+    if state then io.UserInputState = Enum.UserInputState[state] end
+    if x then io.Position = Vector3.new(x, y, 0) end
+    if dx then io.Delta = Vector3.new(dx, dy, 0) end
+    return io
+end
+local function v2_list(flat)
+    local out = {}
+    for i = 1, #flat, 2 do table.insert(out, Vector2.new(flat[i], flat[i + 1])) end
+    return out
+end
+local GESTURE = { Begin = "Begin", Change = "Change", End = "End" }
+-- kind: Began / Moved / Ended (a finger), or a gesture: Tap, LongPress, Pan,
+-- Swipe, Pinch, Rotate (Roblox's UserInputService signatures).
+function __rs_touch_event(kind, id, x, y, dx, dy, gpe, a, b, c, d)
+    local uis = game:GetService("UserInputService")
+    gpe = gpe or false
+    if kind == "Began" or kind == "Moved" or kind == "Ended" then
+        local state = kind == "Began" and "Begin" or kind == "Moved" and "Change" or "End"
+        local io = __rs_touch_object(id, state, x, y, dx, dy)
+        if last_input() ~= "Touch" then
+            last_input_type = "Touch"
+            fire(uis, "LastInputTypeChanged", Enum.UserInputType.Touch)
+        end
+        if not gpe then run_actions(io, io.UserInputState) end
+        fire(uis, kind == "Began" and "InputBegan" or kind == "Moved" and "InputChanged" or "InputEnded", io, gpe)
+        fire(uis, kind == "Began" and "TouchStarted" or kind == "Moved" and "TouchMoved" or "TouchEnded", io, gpe)
+        if kind == "Ended" then table.insert(touch_done, id) end
+    elseif kind == "Tap" then
+        local positions = v2_list(a)
+        fire(uis, "TouchTap", positions, gpe)
+        if positions[1] then fire(uis, "TouchTapInWorld", positions[1], gpe) end
+    elseif kind == "LongPress" then
+        fire(uis, "TouchLongPress", v2_list(a), Enum.UserInputState[GESTURE[b]], gpe)
+    elseif kind == "Pan" then
+        fire(uis, "TouchPan", v2_list(a), Vector2.new(b[1], b[2]), Vector2.new(c[1], c[2]), Enum.UserInputState[GESTURE[d]], gpe)
+    elseif kind == "Swipe" then
+        fire(uis, "TouchSwipe", Enum.SwipeDirection[a], b, gpe)
+    elseif kind == "Pinch" then
+        fire(uis, "TouchPinch", v2_list(a), b, c, Enum.UserInputState[GESTURE[d]], gpe)
+    elseif kind == "Rotate" then
+        fire(uis, "TouchRotate", v2_list(a), b, c, Enum.UserInputState[GESTURE[d]], gpe)
+    end
+end
+-- (a lifted finger's object goes once the frame's GUI events had it)
+local function drop_done_touches()
+    for _, id in touch_done do touch_objects[id] = nil end
+    table.clear(touch_done)
+end
+function __rs_input_frame_end()
+    mouse_delta = Vector2.zero
+    drop_done_touches()
+end
 function M.GetLastInputType(self) return Enum.UserInputType[last_input()] end
 -- The game window gaining / losing focus (UserInputService.WindowFocused /
 -- WindowFocusReleased), sent by the play session when it changes.

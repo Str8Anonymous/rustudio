@@ -498,6 +498,7 @@ struct Input {
     phys: PhysicalKeys,
     viewport: Rect,
     device: Option<crate::device_view::DeviceView>,
+    input_flip: crate::game::InputFlip,
     editor_camera: Option<Camera>,
     frame_no: u64,
     profile_lua: bool,
@@ -508,6 +509,7 @@ struct Input {
     mouse_moved: bool,
     mouse_move_processed: bool,
     mouse_buttons: Vec<(u8, bool, bool)>,
+    touch_input: Vec<(crate::touch::TouchEvent, bool)>,
     wheel: f32,
     wheel_processed: bool,
     menu_open: bool,
@@ -531,6 +533,7 @@ impl Input {
             phys: game.phys.clone(),
             viewport: game.viewport_rect,
             device: game.device.clone(),
+            input_flip: game.input_flip,
             editor_camera: (s.showing == Side::Server).then(|| game.cam.clone()),
             frame_no: game.frame_no,
             profile_lua: rustudio_core::bench::lua_prof_on(),
@@ -541,6 +544,7 @@ impl Input {
             mouse_moved: std::mem::take(&mut s.mouse_moved),
             mouse_move_processed: std::mem::take(&mut s.mouse_move_processed),
             mouse_buttons: std::mem::take(&mut p.uis_mouse),
+            touch_input: std::mem::take(&mut p.touch_input),
             wheel: std::mem::take(&mut s.wheel),
             wheel_processed: std::mem::take(&mut s.wheel_processed),
             menu_open: p.menu_open,
@@ -560,6 +564,7 @@ impl Input {
         game.phys = self.phys;
         game.viewport_rect = self.viewport;
         game.device = self.device;
+        game.input_flip = self.input_flip;
         if let Some(camera) = self.editor_camera {
             game.cam = camera;
         }
@@ -585,6 +590,7 @@ impl Input {
             s.mouse_moved |= self.mouse_moved;
             s.mouse_move_processed |= self.mouse_move_processed;
             p.uis_mouse.extend(self.mouse_buttons);
+            p.touch_input.extend(self.touch_input);
             s.wheel += self.wheel;
             s.wheel_processed |= self.wheel_processed;
             p.menu_open = self.menu_open;

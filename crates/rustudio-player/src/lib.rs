@@ -12,6 +12,7 @@ pub mod luau_eval;
 pub mod offscreen;
 pub mod play;
 pub mod play_teleport;
+pub mod touch;
 mod play_worker;
 mod gamepad;
 pub mod player_app;

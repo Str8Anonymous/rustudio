@@ -640,6 +640,11 @@ pub const DEVICE_KEYBOARD_RANGE: (u32, u32) = (0, 4320); // ... on-screen keyboa
 pub const DEVICE_MEMORY_MIN_GB: f32 = 0.5; // ... memory: a smaller Custom value is raised to this when the field loses focus, with no message (measured)
 pub const DEVICE_CALIBRATE_DPI: (f32, f32, f32) = (80.0, 250.0, 96.0); // Calibrate physical scaling: the slider's range and default, in screen DPI (measured: 80 at the left end, 96 at 9.4 % of the track; the right end from the slider's position, +-5)
 pub const DEVICE_CARD_INCHES: [f32; 2] = [3.37, 2.125]; // Calibrate's card: an ID card, 85.6 x 54 mm (Studio's text: "8.56 cm or 3.37 in wide")
+pub const TOUCH_LONG_PRESS_S: f64 = 0.5; // mouse-as-touch: a still press this long is TouchLongPress (measured in Studio's simulator: Begin after 0.5 s)
+pub const TOUCH_ROTATE_START_RAD: f32 = 0.1; // LeftAlt + drag: TouchRotate begins once the turn passes this (measured, about 0.1 rad)
+pub const TOUCH_TAP_SLOP: f32 = 8.0; // a press that moves less than this (GUI points) is still a tap, and pans only past it (estimate)
+pub const TOUCH_SWIPE_MIN_SPEED: f32 = 400.0; // a drag let go at this speed or faster (points/s) is a TouchSwipe (estimate)
+pub const TOUCH_MARKER_SIZE: f32 = 46.0; // the disc drawn per finger while LeftAlt is held (measured: about 46 points across)
 pub const DEVICE_MENU_ROW: f32 = 17.5; // a dropdown row (measured: 26 screen px at 1.5x)
 pub const GUI_FONT_EM_PER_TEXT_SIZE: f32 = 1.04; // font em = TextSize × this / (line height per em): a line is TextSize tall; the 1.04 matches TextService widths ("START GAME" in Oswald 14/18/24/32 → 46/58/78/104 px in Studio)
 pub const GUI_LEGACY_TEXT_SCALE: f32 = 1.5; // Font.Legacy (Arimo) is drawn at TextSize x this: a default TextLabel (Legacy 8) in Studio 0.747 draws "row 1" 26 px wide, 8 px tall (checks/plugins/widgets/captures/studio-wleft.png), Arimo at TextSize 12; other sizes not measured

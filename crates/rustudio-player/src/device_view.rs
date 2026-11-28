@@ -124,6 +124,7 @@ impl DeviceView {
             safe: [s.left, s.top, s.right, s.bottom],
             display_size: self.device.display_size,
             simulated: true,
+            flip: false,
             id: {
                 use std::hash::{Hash, Hasher};
                 let mut h = std::collections::hash_map::DefaultHasher::new();

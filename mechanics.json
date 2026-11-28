@@ -2393,6 +2393,41 @@
     "memory_min_gb": 0.5
    },
    "source": "Roblox Studio's StudioDeviceSimulatorService:CreateDeviceAsync errors and its Manage devices dialog"
+  },
+  {
+   "name": "touch long press",
+   "group": "device simulator",
+   "value": 0.5,
+   "unit": "s",
+   "source": "Roblox Studio's Device Simulator, measured: TouchLongPress Begin after 0.5 s"
+  },
+  {
+   "name": "touch rotate start",
+   "group": "device simulator",
+   "value": 0.1,
+   "unit": "rad",
+   "source": "Roblox Studio's Device Simulator, measured: TouchRotate begins past about 0.1"
+  },
+  {
+   "name": "touch tap slop",
+   "group": "device simulator",
+   "value": 8,
+   "unit": "points",
+   "estimated": true
+  },
+  {
+   "name": "touch swipe speed",
+   "group": "device simulator",
+   "value": 400,
+   "unit": "points/s",
+   "estimated": true
+  },
+  {
+   "name": "touch marker size",
+   "group": "device simulator",
+   "value": 46,
+   "unit": "points",
+   "source": "Roblox Studio's Device Simulator, measured: about 46 points across"
   }
  ]
 }

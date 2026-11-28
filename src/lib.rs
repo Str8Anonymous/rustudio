@@ -1125,7 +1125,7 @@ pub fn run() -> eframe::Result<()> {
         run: run_harness::RunHarness {
             shot_after,
             log_out,
-            input: run_harness::HarnessInput { actions, pointer: None, shift: false },
+            input: run_harness::HarnessInput { actions, pointer: None, shift: false, mods: egui::Modifiers::NONE },
             started: rustudio_core::sim_clock::now(),
             held: 0.0,
             screenshot,

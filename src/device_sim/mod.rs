@@ -319,6 +319,11 @@ impl crate::app::Editor {
                     sim.popup = if sim.popup == Some(want) { None } else { Some(want) };
                     return true;
                 } else if a == "device_back" {
+                    // Android's back button opens Roblox's in-game menu
+                    // (GuiService.MenuOpened, no key event; measured).
+                    if self.game.is_playing() {
+                        self.game.android_back();
+                    }
                     return true;
                 } else {
                     return false;

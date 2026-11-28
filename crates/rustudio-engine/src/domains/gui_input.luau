@@ -2529,7 +2529,9 @@ local frame_dt = 1 / 60
 -- Min is (0, -58) in Studio's Play (GetInsetArea above).
 local function viewport_pos(x, y)
     local inset = (G.is_client() and not G.is_edit()) and 58 or 0
-    return Vector2.new(x, y + inset)
+    -- (a simulated device: from its whole screen's corner, notch included)
+    local _, _, _, _, l, t = G.device()
+    return Vector2.new(x + l, y + inset + t)
 end
 local function analog_input(kind, x, y)
     local key = Enum.KeyCode[kind]
@@ -2651,6 +2653,135 @@ do
         if frame_end then return frame_end(dt) end
     end
 end
+-- Fingers (mouse-as-touch on a simulated phone or tablet) for the input
+-- action system's touch KeyCodes, as Roblox's Input Action System player
+-- scripts use them (InputContexts.rbxp): TouchPosition with a UIModifier
+-- follows a finger that began on that GuiObject (the DynamicThumbstick's
+-- ThumbstickAction, a ViewportPosition, (-1, -1) once it lifts; its
+-- context's Sink keeps that finger from lower contexts); TouchPosition with
+-- none follows any free finger (Bool: held); TouchDelta is a free finger's
+-- motion, as MouseDelta's rate (the touch camera); TouchPinch the change of
+-- two free fingers' distance (zoom). Which fingers count as free (not over
+-- a GUI that took them, not sunk by a UIModifier binding) and the pinch's
+-- units are estimates: the docs don't give them.
+do -- (its own scope: the chunk is near Luau's 200 locals)
+local fingers = {}
+local finger_order = {}
+local INACTIVE = Vector2.new(-1, -1)
+local function each_touch_binding(fn)
+    for c in tracked.InputContext do
+        if c.Enabled and c:IsDescendantOf(game) then
+            for _, a in c:GetChildren() do
+                if a:IsA("InputAction") and a.Enabled then
+                    for _, b in a:GetChildren() do
+                        if b:IsA("InputBinding") and b.Type ~= Enum.InputBindingType.Scriptable then
+                            local k = b.KeyCode
+                            if k == Enum.KeyCode.TouchPosition or k == Enum.KeyCode.TouchDelta or k == Enum.KeyCode.TouchPinch then
+                                fn(c, a, b, k)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+local function free_fingers()
+    local out = {}
+    for _, io in finger_order do
+        local f = fingers[io]
+        if f and not f.gpe and not f.sunk then table.insert(out, io) end
+    end
+    return out
+end
+local function position_value(a, f)
+    if a.Type == Enum.InputActionType.ViewportPosition then return viewport_pos(f.pos.X, f.pos.Y) end
+    if a.Type == Enum.InputActionType.Bool then return true end
+    return nil
+end
+local function touch_actions(kind, io, gpe)
+    if kind == "Began" then
+        fingers[io] = { pos = Vector2.new(io.Position.X, io.Position.Y), gpe = gpe, owns = {} }
+        table.insert(finger_order, io)
+        local f = fingers[io]
+        if not gpe then
+            each_touch_binding(function(_, a, b, k)
+                if k == Enum.KeyCode.TouchPosition and b.UIModifier == nil and not next(f.owns) then
+                    local v = position_value(a, f)
+                    if v ~= nil then f.owns[a] = true; set_state(a, v) end
+                end
+            end)
+        end
+        return
+    end
+    local f = fingers[io]
+    if not f then return end
+    local old = f.pos
+    f.pos = Vector2.new(io.Position.X, io.Position.Y)
+    if kind == "Moved" then
+        for a in f.owns do
+            local v = position_value(a, f)
+            if v ~= nil and a.Type ~= Enum.InputActionType.Bool then set_state(a, v) end
+        end
+        local free = free_fingers()
+        local d = f.pos - old
+        each_touch_binding(function(_, a, b, k)
+            if k == Enum.KeyCode.TouchDelta and #free == 1 and free[1] == io and a.Type == Enum.InputActionType.Direction2D then
+                analog[a] = (analog[a] or Vector2.zero) + d * b.Vector2Scale * b.Scale / frame_dt
+                set_state(a, keys_value(a) + analog[a])
+            elseif k == Enum.KeyCode.TouchPinch and #free == 2 and (free[1] == io or free[2] == io) and a.Type == Enum.InputActionType.Direction1D then
+                local other = fingers[free[1] == io and free[2] or free[1]]
+                local change = (f.pos - other.pos).Magnitude - (old - other.pos).Magnitude
+                analog[a] = (analog[a] or 0) + change * b.Scale / frame_dt
+                set_state(a, keys_value(a) + analog[a])
+            end
+        end)
+    elseif kind == "Ended" then
+        for a in f.owns do
+            if a.Parent ~= nil then set_state(a, a.Type == Enum.InputActionType.ViewportPosition and INACTIVE or zero_of(a.Type)) end
+        end
+        fingers[io] = nil
+        for i, o in finger_order do
+            if o == io then table.remove(finger_order, i) break end
+        end
+    end
+end
+-- A finger's InputBegan on a GuiObject (the GUI's own Touch event): the
+-- TouchPosition bindings whose UIModifier it is take that finger.
+local function touch_ui(obj, io)
+    local f = fingers[io]
+    if not f then return end
+    each_touch_binding(function(c, a, b, k)
+        if k == Enum.KeyCode.TouchPosition and b.UIModifier == obj and not f.owns[a] then
+            local v = position_value(a, f)
+            if v ~= nil then
+                f.owns[a] = true
+                if c.Sink then f.sunk = true end
+                set_state(a, v)
+            end
+        end
+    end)
+end
+do
+    local inner = __rs_touch_event
+    if inner then
+        __rs_touch_event = function(kind, id, x, y, dx, dy, gpe, ...)
+            local r = inner(kind, id, x, y, dx, dy, gpe, ...)
+            if kind == "Began" or kind == "Moved" or kind == "Ended" then
+                local io = __rs_touch_object(id)
+                local ok, err = pcall(touch_actions, kind, io, gpe or false)
+                if not ok then log("error", "gui_input touch: " .. tostring(err)) end
+            end
+            return r
+        end
+    end
+    __rs_touch_ui = function(obj, io)
+        local ok, err = pcall(touch_ui, obj, io)
+        if not ok then log("error", "gui_input touch: " .. tostring(err)) end
+    end
+end
+end
+
 local function step_mouse()
     local mouse = G.mouse()
     if mouse and not mouse_moved then fire(mouse, "Idle") end

@@ -29,7 +29,9 @@ rustudio place.rbxl --play --from-play --shots 5 --screenshot t.png \
 # --ldrag positions are the device screen's points; --action switches it
 # mid-run (device:ID, device:none, device_rotate, device_simulator,
 # device_form:mobile|desktop|console|headset, device_scaling:fit|actual|physical,
-# device_popup:devices|scaling|lan|quality, device_calibrate, device_manage):
+# device_popup:devices|scaling|lan|quality|touch, device_calibrate, device_manage,
+# device_back); on a phone or tablet the left button is a finger, and
+# --ldrag alt+X1,Y1>X2,Y2@S / alt+shift+… pinches / pans with two fingers:
 rustudio place.rbxl --play-only --window 1914x718 --device iphone_14 --portrait \
   --action device:xbox@8 --screenshot d.png --shot-after 10
 rustudio --write-corpus tools/fidelity/corpus   # regenerate the demo / control places

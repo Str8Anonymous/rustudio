@@ -245,6 +245,15 @@ pub enum GuiArg {
     #[allow(dead_code)]
     Bool(bool),
     Num(f64),
+    /// A finger's InputObject (mouse-as-touch on a simulated device): the
+    /// same object UserInputService's Touch events carry. State 0 Begin,
+    /// 1 Change, 2 End.
+    Touch {
+        id: u32,
+        state: u8,
+        x: f32,
+        y: f32,
+    },
 }
 
 /// Cached layout of a drawn `TextBox` so pointer clicks, double-clicks, and drags
@@ -424,6 +433,9 @@ pub struct Gui {
     /// window points to its points for the pointer (`Gui::input`).
     pub device: Option<DeviceFrame>,
     pub pointer_map: Option<egui::emath::TSTransform>,
+    /// Mouse-as-touch: the finger the pointer is (its touch id). The GUI
+    /// then gets Touch InputObjects, no hover, and no right button or wheel.
+    pub touch_id: Option<u32>,
     /// The inset input positions are measured below (InputObject.Position,
     /// MouseEnter's x, y): None, the game's top bar (GUI_TOP_INSET); a
     /// plugin widget's or the edit viewport's CoreGui: 0.
