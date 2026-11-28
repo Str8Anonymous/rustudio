@@ -440,7 +440,12 @@ rest was measured in Studio's Play with the simulator.
 | Orientation | PlayerGui.CurrentScreenOrientation is Portrait or LandscapeRight on a device (LandscapeLeft with none), and changes one frame after the view | measured |
 | ViewportDisplaySize | each preset's own (consoles and the TV Large, headsets Medium, the rest Small under a 10.35 in diagonal, else Medium); for a custom device the diagonal rule | measured; the rule fitted to the presets |
 | Switch order | flags' Changed (Mouse, Keyboard, Touch, Gamepad), PreferredInput, GamepadDisconnected / Connected, Camera.ViewportSize, GuiService.TopbarInset, then GUI boxes; LastInputTypeChanged does not fire; nothing restarts | measured mid-Play |
-| Fit padding | 16 px round a device with a frame | estimated |
+| Fit padding | 17 px round a device's frame (body and side buttons); a frameless device fills the view | measured (iPhone 14 upright and landscape, Xbox One) |
+| Frames | each framed device's bezel, corner radii, cut-out, side buttons and bezel features, in device points | measured from Studio's frame captures (the XML's wireframe_screen_x/y place the screen in Studio's image, not the visible bezel) |
+| Bar | 27 px tall; pills 22 px, fully rounded; icons 13 px, 20 px apart; the device dropdown 168 px wide, rows 17.5 px | measured (1:1 capture, and 1.5x captures divided by 1.5) |
+| Calibrate | an ID card 3.37 × 2.125 in; the slider runs 80 to 250 DPI, linear, default 96 | measured (the top end ±5) |
+| Manage devices limits | name ≤ 200 characters; width 1–7680, height 1–4320, pixel density 72–10000, keyboard heights 0–4320; memory at least 0.5 GB (raised silently) | measured (Studio's device service and dialog) |
+| Custom devices | a mobile device is a tablet from a 7 in diagonal; resolution scale PPI ÷ 160 rounded (1 on desktops and consoles); new devices' sizes other than a console's 1920 × 1080 at 96 PPI | estimates |
 
 ## FBX models (InsertService:LoadAsset)
 

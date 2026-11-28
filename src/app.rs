@@ -544,6 +544,11 @@ impl RustudioApp {
         if ed.harness.run.no_ui && !ed.harness.overlays {
             ed.clean_view = true;
         }
+        // Custom devices (Manage devices) are a person's own: read only in
+        // runs a person drives.
+        if crate::layout_store::enabled(&ed.harness) {
+            ed.device_sim.load_custom();
+        }
         if let Some((id, portrait)) = ed.harness.device.clone() {
             ed.device_sim.shown = true;
             ed.device_sim.select(Some(&id));
@@ -1643,20 +1648,7 @@ impl Editor {
         match a {
             "undo" => self.undo(),
             "redo" => self.redo(),
-            "device_simulator" => {
-                self.device_sim.shown = !self.device_sim.shown;
-                self.device_sim.save();
-            }
-            "device_rotate" => {
-                self.device_sim.rotate();
-                self.device_sim.save();
-            }
-            a if a.starts_with("device:") => {
-                let id = &a["device:".len()..];
-                self.device_sim.shown = true;
-                self.device_sim.select((id != "none").then_some(id));
-                self.device_sim.save();
-            }
+            a if (a.starts_with("device") || a == "device_simulator") && self.device_sim_action(a) => {}
             "copy" => {
                 self.copy();
             }
@@ -2872,7 +2864,7 @@ impl RustudioApp {
             // The Toolbox's deep links work without the panel (headless checks).
             if a.starts_with("toolbox:") {
                 ed.toolbox_action(&a);
-            } else if a == "device_simulator" || a == "device_rotate" || a.starts_with("device:") {
+            } else if a.starts_with("device") {
                 // (the Device Simulator lives in the view: no panel needed)
                 ed.run_action(&a);
             } else {

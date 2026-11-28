@@ -44,12 +44,15 @@ impl DeviceView {
         };
         let (outer_w, outer_h) = (w + bezel.left + bezel.right, h + bezel.top + bezel.bottom);
         let ppp = ppp.max(0.01);
+        // (the panel in whole pixels: a fraction of a pixel more or less
+        // doesn't change the scale, so the size scripts see stays put)
+        let whole = |v: f32| (v * ppp + 1e-3).floor() / ppp;
         let k = match scaling {
             Scaling::FitToWindow => {
                 // (a frameless device fills the panel: Studio's Xbox One is
                 // 1080 high in a 718 px panel, measured 1919x1080)
                 let pad = if device.frame.is_some() { mech::DEVICE_FIT_PADDING_PX } else { 0.0 };
-                ((panel.width() - 2.0 * pad) / outer_w).min((panel.height() - 2.0 * pad) / outer_h)
+                ((whole(panel.width()) - 2.0 * pad) / outer_w).min((whole(panel.height()) - 2.0 * pad) / outer_h)
             }
             Scaling::ActualResolution => 1.0,
             Scaling::PhysicalSize => device.resolution_scale / device.ppi.max(1.0) * dpi / ppp,

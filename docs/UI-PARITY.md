@@ -163,3 +163,27 @@ pair in `checks/ui/side-output.png`.
 | Context bar | green (0, 204, 103) for server lines (Run included), blue (52, 154, 213) for client lines; none on stack lines | the same | done |
 | Toolbar | All Messages, All Contexts, Filter…, clear, ⋯ | the same; ⋯ holds Show Timestamp / Show Context / Show Source | done |
 | Line pitch | 15 px | 15 px | done |
+
+## Device Simulator
+
+Captured: Studio 0.748's simulator bar, its dropdowns for every form,
+the frames of all 30 framed devices, the scaling, network, performance
+and touch popovers, Calibrate and Manage devices (local captures; the
+numbers are in docs/MECHANICS.md). Studio's frame images and icons are
+Roblox's art: Rustudio draws its own frames from measurements and uses
+Tabler icons (one drawn icon: the virtual controller).
+
+| Item | Studio | rustudio | Status |
+|---|---|---|---|
+| Turning it on | Test > Device Simulator (greyed with its check during Play) | the same; the top row's phone button too | done |
+| Bar | over the view in edit and Play, 27 px, #131215; the four form buttons, the current one replaced in place by the device pill; right: Rotate, Mock Android back button (Android), Touch controls, Virtual controller, Display scaling, LAN, Q## (Auto with no device) | the same layout, order and tooltips | done |
+| Device dropdown | the form's devices under Flagship / Mid-range / Entry level / Other (Desktop computer, Console, Headset), A to Z, the size in a chip, a tick on the current one, names cut with "…", then Manage devices; the pill turns light while open | the same | done |
+| Dropdown wheel cycling | behind a Studio flag (DeviceSimulatorWheelCycleDevice), not on by default | — | not in this Studio by default (flagged) |
+| Form buttons | switch to that form's last device | the same; first time: iPhone 14, Current device, Xbox One, Meta Quest 3 (estimate) | done |
+| Frames | per-device art: home-button iPhones, notch, Dynamic Island, teardrop and punch-hole Androids, tablets; none for the TV, desktops, consoles, headsets | Rustudio's own frames drawn from each device's measured bezel, corners, cut-out, side buttons and bezel features; the same devices without one | done |
+| Letterbox | #202227 round the device, a scroll bar track at the right | the same | done |
+| Display scaling | Physical size, Actual resolution, Fit to window (default), Calibrate physical scaling; a device bigger than the view scrolls | the same (vertical scroll bar, wheel over the letterbox) | done |
+| Calibrate physical scaling | a separate dialog: Studio's text, a card between dashed guides, a slider (80–250 DPI), Accept / Cancel | an in-window dialog with the same text, card and range; Rustudio's own card picture | partial: in-window dialog, as Studio Settings |
+| Manage devices | a separate window titled "RobloxStudio": tabs Mobile / Desktop / Console / Headset; Custom (+) and Standard (+) lists; Name, Platform, Display, Performance (Memory options per form + Custom), Keyboard settings; Apply / Cancel / Duplicate; Studio's validation messages | an in-window dialog with the same parts, names and messages; custom devices are kept in ~/.config/rustudio/devices.json | partial: in-window dialog, as Studio Settings |
+| LAN and Q## popovers | network and performance simulation | the same popovers, every control greyed (Rustudio simulates neither) | done (greyed) |
+| Touch controls, Back, Virtual controller | mouse-as-touch help, Android back, Controller Emulator | shown greyed until they work | partial |

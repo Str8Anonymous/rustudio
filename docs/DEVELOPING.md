@@ -27,7 +27,9 @@ rustudio place.rbxl --play --from-play --shots 5 --screenshot t.png \
 # The Device Simulator on one of Studio's devices (ids in
 # crates/rustudio-core/src/devices.rs), upright; with a device, --click and
 # --ldrag positions are the device screen's points; --action switches it
-# mid-run (device:ID, device:none, device_rotate, device_simulator):
+# mid-run (device:ID, device:none, device_rotate, device_simulator,
+# device_form:mobile|desktop|console|headset, device_scaling:fit|actual|physical,
+# device_popup:devices|scaling|lan|quality, device_calibrate, device_manage):
 rustudio place.rbxl --play-only --window 1914x718 --device iphone_14 --portrait \
   --action device:xbox@8 --screenshot d.png --shot-after 10
 rustudio --write-corpus tools/fidelity/corpus   # regenerate the demo / control places
