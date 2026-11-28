@@ -133,6 +133,9 @@ pub struct Harness {
     pub plugin_dirs: Vec<PathBuf>,
     pub no_plugins: bool,
     pub plugins_started: bool,
+    /// `--device ID [--portrait]`: the Device Simulator shows that device
+    /// (this run only).
+    pub device: Option<(String, bool)>,
 }
 
 #[cfg(test)]
@@ -189,6 +192,7 @@ impl Harness {
             plugin_dirs: Vec::new(),
             no_plugins: true,
             plugins_started: false,
+            device: None,
         }
     }
 }
@@ -287,6 +291,8 @@ pub struct Editor {
     pub last_zoom: Option<(Vec3, Option<f32>)>,
     pub hud: HudStats,
     pub ui_rects: HashMap<&'static str, egui::Rect>,
+    /// Test > Device Simulator: the simulated device and how it is shown.
+    pub device_sim: crate::device_sim::DeviceSim,
     /// Screen positions of gizmo handles last frame (axis, sign) -> point.
     pub gizmo_points: Vec<(crate::viewport::Handle, egui::Pos2)>,
     /// Selection / hover outlines kept while nothing they depend on changes.
@@ -488,6 +494,7 @@ impl RustudioApp {
             last_zoom: None,
             hud: HudStats::default(),
             ui_rects: HashMap::new(),
+            device_sim: crate::device_sim::DeviceSim::load(),
             gizmo_points: Vec::new(),
             outline_cache: Default::default(),
             hover_outline_refs: (None, Vec::new()),
@@ -536,6 +543,15 @@ impl RustudioApp {
         // unless --overlays keeps the editor's overlays.
         if ed.harness.run.no_ui && !ed.harness.overlays {
             ed.clean_view = true;
+        }
+        if let Some((id, portrait)) = ed.harness.device.clone() {
+            ed.device_sim.shown = true;
+            ed.device_sim.select(Some(&id));
+            ed.device_sim.orientation = if portrait {
+                rustudio_core::devices::Orientation::Portrait
+            } else {
+                rustudio_core::devices::Orientation::Landscape
+            };
         }
         ed.ui.show_core_gui = ed.harness.run.show_core_gui;
         ed.game.show_core_gui = ed.harness.run.show_core_gui;
@@ -1627,6 +1643,20 @@ impl Editor {
         match a {
             "undo" => self.undo(),
             "redo" => self.redo(),
+            "device_simulator" => {
+                self.device_sim.shown = !self.device_sim.shown;
+                self.device_sim.save();
+            }
+            "device_rotate" => {
+                self.device_sim.rotate();
+                self.device_sim.save();
+            }
+            a if a.starts_with("device:") => {
+                let id = &a["device:".len()..];
+                self.device_sim.shown = true;
+                self.device_sim.select((id != "none").then_some(id));
+                self.device_sim.save();
+            }
             "copy" => {
                 self.copy();
             }
@@ -2842,6 +2872,9 @@ impl RustudioApp {
             // The Toolbox's deep links work without the panel (headless checks).
             if a.starts_with("toolbox:") {
                 ed.toolbox_action(&a);
+            } else if a == "device_simulator" || a == "device_rotate" || a.starts_with("device:") {
+                // (the Device Simulator lives in the view: no panel needed)
+                ed.run_action(&a);
             } else {
                 eprintln!("--action {a}: no editor in --no-ui");
             }
@@ -2927,7 +2960,7 @@ impl Editor {
 impl Editor {
     pub fn harness_inject(&mut self, raw: &mut egui::RawInput) {
         let mut input = std::mem::take(&mut self.harness.run.input);
-        input.inject(self.game.viewport_rect, self.game.lock_center_held(), self.harness.run.now(), raw, |name, raw| {
+        input.inject(self.game.viewport_rect, self.game.device.as_ref().map_or(1.0, |v| v.k), self.game.lock_center_held(), self.harness.run.now(), raw, |name, raw| {
             if self.plugin_widget_action(&name, raw) {
                 // plugin-widget:PLUGIN/WIDGET:CMD
             } else if self.harness_pointer(&name, raw) {

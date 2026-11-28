@@ -2363,6 +2363,22 @@ impl Game {
         self.gui.begin_vram_frame();
         let playing = self.play.is_some();
         self.gui.pointer_override = self.lock_center_held().then(|| rect.center());
+        // A simulated device: its GUI is laid out in its own points over its
+        // safe area and the shapes are moved into place on screen after.
+        let device = self.device.clone();
+        self.gui.device = device.as_ref().map(|v| rustudio_engine::gui::DeviceFrame { screen: v.screen_rect_dev(), scale: v.k });
+        self.gui.pointer_map = device.as_ref().map(|v| v.pointer_transform());
+        let (gui_rect, gui_painter) = match &device {
+            Some(v) => {
+                // (device coordinates: the clip is moved with the shapes)
+                let mut p = painter.clone();
+                p.set_clip_rect(v.screen_rect_dev());
+                (v.safe_rect_dev(), p)
+            }
+            None => (rect, painter.clone()),
+        };
+        let layer = painter.layer_id();
+        let shapes_from = ctx.graphics_mut(|g| g.entry(layer).next_idx());
         {
             let doc_dir = self
                 .doc
@@ -2382,12 +2398,12 @@ impl Game {
                 gui.sync_roots(doc);
                 gui.draw(
                     &ctx,
-                    &painter,
+                    &gui_painter,
                     rustudio_engine::gui::DrawIn {
                         render_state: self.render_state.as_ref(),
                         doc,
                         cam,
-                        rect,
+                        rect: gui_rect,
                         store: assets,
                         doc_dir: doc_dir.as_deref(),
                         playing,
@@ -2395,6 +2411,10 @@ impl Game {
                         roots: rustudio_engine::gui::Roots::View,
                     },
                 );
+                if let Some(v) = &device {
+                    let to = ctx.graphics_mut(|g| g.entry(layer).next_idx());
+                    ctx.graphics_mut(|g| g.entry(layer).transform_range(shapes_from, to, v.gui_transform()));
+                }
                 // The game's cursor image over the view. While LockCenter
                 // holds the mouse (shift lock, first person) Roblox draws it
                 // in the middle of the view, where its mouse is, at the
@@ -2432,7 +2452,7 @@ impl Game {
             // (The open legacy egui menu covers the game's GUIs: they get no input.
             // CoreScripts' SettingsHub is drawn by `gui` itself, so `gui.input` must run.)
             if playing && !play.as_ref().is_some_and(|s| s.game.menu_open) {
-                let took = gui.input(&ctx, &resp, rect);
+                let took = gui.input(&ctx, &resp, gui_rect);
                 if gui.wheel_sunk() {
                     if let Some(s) = play.as_mut() {
                         s.wheel_processed = true;

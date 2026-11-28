@@ -2,6 +2,7 @@
 
 pub mod account;
 pub mod asset_report;
+pub mod device_view;
 pub mod edit_audio;
 pub mod emote_wheel;
 pub mod game;

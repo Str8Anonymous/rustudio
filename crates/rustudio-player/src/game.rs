@@ -50,7 +50,12 @@ pub struct Game {
     pub cursor_log: Vec<String>,
     /// Test Here: the character's first spawn point (the camera's position).
     pub play_here: Option<Vec3>,
+    /// Where the 3D image is: the whole panel, or a simulated device's screen.
     pub viewport_rect: egui::Rect,
+    /// The simulated device (Device Simulator) and its place in the panel.
+    pub device: Option<crate::device_view::DeviceView>,
+    /// The 3D panel, around the device.
+    pub view_panel: egui::Rect,
     pub frame_no: u64,
     pub snap_move: bool,
     pub move_inc: f32,
@@ -139,6 +144,34 @@ pub struct Game {
 }
 
 impl Game {
+    /// Camera.ViewportSize: a simulated device's safe area in its points,
+    /// else the view in window points.
+    pub fn script_view_size(&self) -> [f32; 2] {
+        match &self.device {
+            Some(v) => v.safe_size(),
+            None => [self.viewport_rect.width(), self.viewport_rect.height()],
+        }
+    }
+
+    /// What the client is told about its device: the simulated device's own
+    /// input, else Studio's desktop.
+    pub fn device_input(&self) -> rustudio_engine::runtime::ext::DeviceInput {
+        self.device.as_ref().map(|v| v.input()).unwrap_or_default()
+    }
+
+    /// A window point in the view as GUI-space coordinates (InputObject /
+    /// Mouse positions are below the top bar, from the safe area's corner on
+    /// a device): x, y from the view's (or safe area's) top-left.
+    pub fn view_xy(&self, p: egui::Pos2) -> [f32; 2] {
+        match &self.device {
+            Some(v) => {
+                let q = v.to_device(p);
+                [q.x - v.safe.left, q.y - v.safe.top]
+            }
+            None => [p.x - self.viewport_rect.min.x, p.y - self.viewport_rect.min.y],
+        }
+    }
+
     pub fn new(render_state: Option<egui_wgpu::RenderState>) -> Self {
         let renderer = render_state.as_ref().map(|rs| {
             rustudio_render::gpu_health::watch(&rs.adapter, &rs.device);
@@ -179,6 +212,8 @@ impl Game {
             cursor_log: Vec::new(),
             play_here: None,
             viewport_rect: egui::Rect::NOTHING,
+            device: None,
+            view_panel: egui::Rect::NOTHING,
             frame_no: 0,
             snap_move: mech::SNAP_ON_BY_DEFAULT,
             move_inc: mech::MOVE_SNAP,

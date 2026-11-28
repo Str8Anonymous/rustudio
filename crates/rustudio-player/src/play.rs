@@ -3814,6 +3814,13 @@ impl Game {
                 })
             });
             let accepts_gamepad = focused_now && self.play_game_input() && !menu_open;
+            // A simulated console, headset or TV holds a gamepad slot of its own.
+            let device_pad = self.device.as_ref().is_some_and(|v| v.device.native_gamepad());
+            let virtual_pad = self
+                .play
+                .as_mut()
+                .and_then(|s| s.gamepads.reserve(device_pad))
+                .map(|slot| slot as u8);
             let gamepads = self
                 .play
                 .as_mut()
@@ -3946,17 +3953,31 @@ impl Game {
                         host.keep_play_layout(&old, &mut w.input.gui_layout);
                     }
                     w.input.menu_open = menu_open;
+                    w.input.virtual_pad = virtual_pad;
                 }
-                // AbsoluteSize / AbsolutePosition / ViewportSize changes from
-                // the new layout (a resized window refits screen-sized GUIs).
+                // A Device Simulator switch (flags, PreferredInput, the device's
+                // pad), then AbsoluteSize / AbsolutePosition / ViewportSize
+                // changes from the new layout (a resized window refits
+                // screen-sized GUIs).
                 {
                     let _s = rustudio_core::bench::scope("p6b_layout_changes");
+                    let _ = rustudio_engine::runtime::ext::fire_device_changes(&rt.lua);
                     let _ = rustudio_engine::runtime::ext::fire_layout_changes(&rt.lua);
                 }
                 // GuiService.MenuOpened / MenuClosed (the Esc menu).
                 if let Some(gs) = gui_service {
                     for open in &menu_events {
                         rt.fire(gs, if *open { "MenuOpened" } else { "MenuClosed" }, vec![]);
+                    }
+                    // (a host pad moved out of Gamepad1 for the simulated
+                    // pad goes first: it reappears in its new slot below)
+                    if let Some(uis) = cuis.filter(|_| gamepads.vacated != 0) {
+                        for i in (0..8).filter(|i| gamepads.vacated & (1 << i) != 0) {
+                            let pad = LEnumItem::from_name("UserInputType", &format!("Gamepad{}", i + 1))
+                                .and_then(|e| rustudio_engine::ltypes::enum_value(&rt.lua, e).ok())
+                                .unwrap_or(Value::Nil);
+                            rt.fire(uis, "GamepadDisconnected", vec![pad]);
+                        }
                     }
                 }
                 // Input reaches ContextActionService's bound actions, then
@@ -4801,6 +4822,53 @@ mod client_start_order_tests {
             "#),
             None
         );
+    }
+
+    /// A Play started with a device already chosen: the first client script
+    /// sees its flags (the PlayerModule reads PreferredInput once as it starts).
+    #[test]
+    fn play_starts_with_the_simulated_flags() {
+        let mut game = Game::new(None);
+        let root = game.doc.dom.root_ref();
+        let rf = game.doc.find_child(root, "ReplicatedFirst")
+            .unwrap_or_else(|| game.doc.dom.insert(root, InstanceBuilder::new("ReplicatedFirst").with_name("ReplicatedFirst")));
+        game.doc.dom.insert(rf, InstanceBuilder::new("LocalScript").with_property("Source", r#"
+            local U = game:GetService("UserInputService")
+            _G.pref = U.PreferredInput.Name
+            _G.view = workspace.CurrentCamera.ViewportSize
+        "#.to_string()));
+        let panel = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1914.0, 718.0));
+        let d = rustudio_core::devices::preset("iphone_14").unwrap();
+        let view = crate::device_view::DeviceView::layout(panel, d, rustudio_core::devices::Orientation::Landscape,
+            crate::device_view::Scaling::FitToWindow, rustudio_core::devices::Insets::default(), 96.0, 1.0);
+        game.viewport_rect = view.screen_win;
+        let want = view.safe_size();
+        game.device = Some(view);
+        game.start_play(RunMode::Play, &mut (), false, None);
+        tick(&mut game, 30);
+        assert_eq!(
+            game.run_luau(Side::Client, &format!(r#"
+                assert(_G.pref == "Touch", tostring(_G.pref))
+                assert(_G.view == Vector2.new({}, {}), tostring(_G.view))
+            "#, want[0], want[1])),
+            None
+        );
+    }
+
+    #[test]
+    fn pointer_xy_is_in_safe_device_points() {
+        let mut game = Game::new(None);
+        let panel = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(1914.0, 718.0));
+        let d = rustudio_core::devices::preset("iphone_14").unwrap();
+        let view = crate::device_view::DeviceView::layout(panel, d, rustudio_core::devices::Orientation::Landscape,
+            crate::device_view::Scaling::FitToWindow, rustudio_core::devices::Insets::default(), 96.0, 1.0);
+        let at = view.to_window(egui::pos2(47.0 + 10.0, 20.0));
+        game.viewport_rect = view.screen_win;
+        let want = view.safe_size();
+        game.device = Some(view);
+        let xy = game.view_xy(at);
+        assert!((xy[0] - 10.0).abs() < 1e-3 && (xy[1] - 20.0).abs() < 1e-3, "{xy:?}");
+        assert_eq!(game.script_view_size(), want);
     }
 
     fn tick(game: &mut Game, n: usize) {

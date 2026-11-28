@@ -143,7 +143,11 @@ end
 get["GuiService.ReducedMotionEnabled"] = function()
     return (__rs_user_game_settings and __rs_user_game_settings.ReducedMotion) == true
 end
-get["GuiService.ViewportDisplaySize"] = function() return Enum.DisplaySize.Medium end
+-- Medium on a desktop; a simulated device's own size (measured per device).
+get["GuiService.ViewportDisplaySize"] = function()
+    local _, _, _, _, _, _, _, _, _, size = G.device()
+    return Enum.DisplaySize[size]
+end
 get["GuiService.IsWindows"] = function() return true end
 get["GuiService.CoreGuiFolder"] = function() return svc("CoreGui") end
 get["GuiService.CoreEffectFolder"] = function() return svc("CoreGui") end
@@ -357,6 +361,7 @@ end
 
 get["GuiService.TopbarInset"] = G.topbar_inset
 local function step_topbar()
+    if not G.is_client() or G.is_edit() then return end
     local rect = G.topbar_inset()
     if rect == topbar_seen then return end
     local first = topbar_seen == nil
@@ -487,6 +492,12 @@ methods["GuiService.GetInsetArea"] = function(_, insets)
     if insets == Enum.ScreenInsets.TopbarSafeInsets and inset > 0 then
         local bar = G.topbar_inset()
         return Rect.new(bar.Min.X, bar.Min.Y - inset, bar.Max.X, bar.Max.Y - inset)
+    end
+    -- None: the whole screen, under a simulated device's notch too
+    -- (measured, iPhone 14 portrait: (0, -105, 389, 738)).
+    if insets == Enum.ScreenInsets.None and inset > 0 then
+        local _, _, sw, sh, l, t = G.device()
+        return Rect.new(-l, -t - inset, sw - l, sh - t - inset)
     end
     return Rect.new(0, -inset, w, h - inset)
 end
@@ -785,7 +796,13 @@ end
 
 ----------------------------------------------------------------- PlayerGui
 local topbar = {}
-get["PlayerGui.CurrentScreenOrientation"] = function() return Enum.ScreenOrientation.LandscapeLeft end
+-- A simulated device's orientation (measured: Portrait, or LandscapeRight
+-- in landscape); LandscapeLeft with none.
+get["PlayerGui.CurrentScreenOrientation"] = function()
+    local portrait, simulated = G.device()
+    if portrait then return Enum.ScreenOrientation.Portrait end
+    return simulated and Enum.ScreenOrientation.LandscapeRight or Enum.ScreenOrientation.LandscapeLeft
+end
 methods["PlayerGui.GetTopbarTransparency"] = function(self) return topbar[self] or 0.5 end
 methods["PlayerGui.SetTopbarTransparency"] = function(self, v)
     v = tonumber(v)
@@ -3190,6 +3207,14 @@ end
 -- events (a press elsewhere ends typing first: a TextBox's FocusLost comes
 -- before the pressed button's Activated, as Studio; Argon reads its port box
 -- on FocusLost and connects on Activated).
+-- GuiService.TopbarInset's change, right after Camera.ViewportSize's
+-- (runtime_ext.rs fire_layout_changes).
+function M.step_topbar()
+    refresh_game()
+    local ok, err = pcall(step_topbar)
+    if not ok then log("error", "gui_input topbar: " .. tostring(err)) end
+end
+
 function M.focus_now()
     if not G.is_client() then return end
     local ok, err = xpcall(step_focus, debug.traceback)

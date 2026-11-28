@@ -505,7 +505,19 @@ impl Editor {
     }
 
     pub fn viewport_ui(&mut self, ui: &mut egui::Ui) {
-        let rect = ui.available_rect_before_wrap();
+        let panel = ui.available_rect_before_wrap();
+        // Test > Device Simulator: the 3D view, its tools and picking live in
+        // the simulated device's screen; the rest of the panel is letterbox
+        // (presses there do nothing).
+        self.game.view_panel = panel;
+        self.game.device = self.device_sim.view(panel, ui.ctx().pixels_per_point());
+        let rect = match &self.game.device {
+            Some(v) => {
+                ui.painter_at(panel).rect_filled(panel, 0.0, rustudio_engine::theme::PANEL_DARK);
+                v.screen_win
+            }
+            None => panel,
+        };
         self.game.viewport_rect = rect;
         rustudio_render::grass_temporal::tick(&mut self.game.cam, ui.ctx());
         let selector = Self::view_selector_rect(rect);

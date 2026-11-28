@@ -946,15 +946,18 @@ impl Game {
     /// mouse ever moves over it.
     pub(super) fn sync_view_size(&mut self) {
         let r = self.viewport_rect;
-        if r.is_positive() {
-            if let Some(w) = self
-                .play
-                .as_mut()
-                .and_then(|s| s.client.as_mut())
-                .and_then(|c| c.world.as_mut())
-            {
-                w.input.view_size = [r.width(), r.height()];
+        let view = self.script_view_size();
+        let device = self.device_input();
+        if let Some(w) = self
+            .play
+            .as_mut()
+            .and_then(|s| s.client.as_mut())
+            .and_then(|c| c.world.as_mut())
+        {
+            if r.is_positive() {
+                w.input.view_size = view;
             }
+            w.input.device = device;
         }
     }
 
@@ -977,7 +980,6 @@ impl Game {
         };
         w.input.mouse_ray = (p.origin, p.dir);
         w.input.mouse_xy = p.xy;
-        w.input.view_size = p.view;
         w.input.mouse_target = hit.map(|h| h.0);
         w.input.mouse_hit = Some(Xform {
             pos: hit.map(|h| h.1).unwrap_or(p.origin + p.dir * 1000.0),
@@ -2331,8 +2333,8 @@ impl Game {
                 dir: ray.dir,
                 hit: None,
                 click: None,
-                xy: [p.x - rect.min.x, p.y - rect.min.y],
-                view: [rect.width(), rect.height()],
+                xy: self.view_xy(p),
+                view: self.script_view_size(),
                 side,
             }
         });

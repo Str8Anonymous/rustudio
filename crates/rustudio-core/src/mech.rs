@@ -623,6 +623,8 @@ pub const GUI_TOPBAR_LEFT_CHAT: f32 = 128.0; // ... with the chat button (TopBar
 pub fn gui_topbar_left(chat: bool) -> f32 {
     if chat { GUI_TOPBAR_LEFT_CHAT } else { GUI_TOPBAR_LEFT }
 }
+// Device Simulator (devices.rs, crates/rustudio-player/src/device_view.rs)
+pub const DEVICE_FIT_PADDING_PX: f32 = 16.0; // Fit to window: free space kept round a device with a frame (estimated; a frameless device fills the panel, measured: Studio's Xbox One is 1080 high in a 718 px panel)
 pub const GUI_FONT_EM_PER_TEXT_SIZE: f32 = 1.04; // font em = TextSize × this / (line height per em): a line is TextSize tall; the 1.04 matches TextService widths ("START GAME" in Oswald 14/18/24/32 → 46/58/78/104 px in Studio)
 pub const GUI_LEGACY_TEXT_SCALE: f32 = 1.5; // Font.Legacy (Arimo) is drawn at TextSize x this: a default TextLabel (Legacy 8) in Studio 0.747 draws "row 1" 26 px wide, 8 px tall (checks/plugins/widgets/captures/studio-wleft.png), Arimo at TextSize 12; other sizes not measured
 pub const GUI_MESSAGE_FILL: [f32; 4] = [0.5, 0.5, 0.5, 0.5]; // a Message's full-screen box, RGBA (Studio 0.747 Message::renderFullScreen: Adorn::rect2d over the whole view in Color4 (0.5, 0.5, 0.5, 0.5); a black sky reads 64,64,64 under it in the Roblox client)

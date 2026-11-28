@@ -107,6 +107,11 @@ impl Editor {
                 }
             }
             "asset_manager" => (true, open("Asset Manager")),
+            // Test > Device Simulator: greyed (with its check) during Play,
+            // as Studio; the device can still be switched or turned.
+            "device_simulator" => (edit, Some(self.device_sim.shown)),
+            "device_rotate" => (self.device_sim.shown, None),
+            a if a.starts_with("device:") => (self.device_sim.shown || edit, None),
             "microprofiler" => (true, open("MicroProfiler")),
             a if a.starts_with("toolbox:") => (
                 self.builtin_tools.use_native(rustudio_core::rustudio_settings::BuiltinTool::Toolbox),

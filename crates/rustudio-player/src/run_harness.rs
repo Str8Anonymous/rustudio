@@ -797,7 +797,9 @@ impl HarnessAction {
 
 impl HarnessInput {
     /// Timed harness input, injected like real events.
-    pub fn inject(&mut self, view: egui::Rect, locked: bool, now: Option<f32>, raw: &mut egui::RawInput, mut ui_action: impl FnMut(String, &mut egui::RawInput)) {
+    /// `view_scale`: window points per view unit (a simulated device's
+    /// scale: --click X,Y are then the device screen's points).
+    pub fn inject(&mut self, view: egui::Rect, view_scale: f32, locked: bool, now: Option<f32>, raw: &mut egui::RawInput, mut ui_action: impl FnMut(String, &mut egui::RawInput)) {
         let Some(t) = now else { return };
         // No 3D view yet (the start page): clicks are window coordinates.
         let vp = if view.is_finite() {
@@ -831,7 +833,7 @@ impl HarnessInput {
             match a {
                 HarnessAction::Luau(..) => {}
                 HarnessAction::Click(x, y) => {
-                    let p = if locked { held_at } else { vp.min + egui::vec2(x, y) };
+                    let p = if locked { held_at } else { vp.min + egui::vec2(x, y) * view_scale };
                     if !locked {
                         raw.events.push(egui::Event::PointerMoved(p));
                     }
@@ -884,7 +886,7 @@ impl HarnessInput {
                 }
                 HarnessAction::Paste(text) => raw.events.push(egui::Event::Paste(text)),
                 HarnessAction::Wheel(n, at) => {
-                    let p = at.map_or(vp.center(), |(x, y)| vp.min + egui::vec2(x, y));
+                    let p = at.map_or(vp.center(), |(x, y)| vp.min + egui::vec2(x, y) * view_scale);
                     raw.events.push(egui::Event::PointerMoved(p));
                     raw.events.push(egui::Event::MouseWheel {
                         unit: egui::MouseWheelUnit::Line,
@@ -909,11 +911,11 @@ impl HarnessInput {
                 }
                 HarnessAction::PointerAt(x, y) => {
                     if !locked {
-                        raw.events.push(egui::Event::PointerMoved(vp.min + egui::vec2(x, y)));
+                        raw.events.push(egui::Event::PointerMoved(vp.min + egui::vec2(x, y) * view_scale));
                     }
                 }
                 HarnessAction::LeftButton(x, y, pressed) => {
-                    let p = if locked { held_at } else { vp.min + egui::vec2(x, y) };
+                    let p = if locked { held_at } else { vp.min + egui::vec2(x, y) * view_scale };
                     if !locked {
                         raw.events.push(egui::Event::PointerMoved(p));
                     }

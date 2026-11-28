@@ -200,6 +200,30 @@ mod tests {
     /// PlayView.settings so toggling CameraYInverted On then Off (even after
     /// the 1 s `shown` window expires), changing MouseSensitivity, and
     /// changing MasterVolume all round-trip cleanly.
+    /// A threaded Play on a phone: scripts that start with Play see the
+    /// phone, not a desktop, even before the first frame.
+    #[test]
+    fn threaded_play_starts_with_the_simulated_flags() {
+        let mut game = Game::new(None);
+        let root = game.doc.dom.root_ref();
+        let rf = game.doc.find_child(root, "ReplicatedFirst")
+            .unwrap_or_else(|| game.doc.dom.insert(root, rbx_dom_weak::InstanceBuilder::new("ReplicatedFirst").with_name("ReplicatedFirst")));
+        game.doc.dom.insert(rf, rbx_dom_weak::InstanceBuilder::new("LocalScript").with_property("Source", r#"
+            _G.pref = game:GetService("UserInputService").PreferredInput.Name
+        "#.to_string()));
+        let panel = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1914.0, 718.0));
+        let view = crate::device_view::DeviceView::layout(panel, rustudio_core::devices::preset("iphone_14").unwrap(),
+            rustudio_core::devices::Orientation::Landscape, crate::device_view::Scaling::FitToWindow,
+            rustudio_core::devices::Insets::default(), 96.0, 1.0);
+        game.viewport_rect = view.screen_win;
+        game.device = Some(view);
+        game.fixed_dt = Some(1.0 / 60.0);
+        game.start_play_threaded(RunMode::Play, &mut (), false, None);
+        assert!(game.has_play_worker());
+        let e = game.run_luau(Side::Client, "error('PREF[' .. tostring(_G.pref) .. ']', 0)").unwrap_or_default();
+        assert!(e.contains("PREF[Touch]"), "{e}");
+    }
+
     #[test]
     fn game_menu_settings_round_trip_with_play_worker() {
         use crate::play::game::game_menu::MenuPage;
@@ -473,6 +497,7 @@ struct Input {
     keyboard: PlayKeyboard,
     phys: PhysicalKeys,
     viewport: Rect,
+    device: Option<crate::device_view::DeviceView>,
     editor_camera: Option<Camera>,
     frame_no: u64,
     profile_lua: bool,
@@ -505,6 +530,7 @@ impl Input {
             keyboard,
             phys: game.phys.clone(),
             viewport: game.viewport_rect,
+            device: game.device.clone(),
             editor_camera: (s.showing == Side::Server).then(|| game.cam.clone()),
             frame_no: game.frame_no,
             profile_lua: rustudio_core::bench::lua_prof_on(),
@@ -533,6 +559,7 @@ impl Input {
         self.edits.apply(game);
         game.phys = self.phys;
         game.viewport_rect = self.viewport;
+        game.device = self.device;
         if let Some(camera) = self.editor_camera {
             game.cam = camera;
         }
@@ -831,6 +858,10 @@ impl Game {
         let show_client = self.play_shows_client;
         let keep_game_settings = self.keep_game_settings;
         let fixed_dt = self.fixed_dt;
+        // The view and the simulated device as Play starts: client scripts
+        // that start with it (the PlayerModule) read the device's input
+        // before the first frame's input reaches the worker.
+        let (viewport_rect, device) = (self.viewport_rect, self.device.clone());
         let teleport = self.teleport_to.take();
         if teleport.is_none() {
             self.play_origin = live_ids;
@@ -846,6 +877,8 @@ impl Game {
             game.play_shows_client = show_client;
             game.keep_game_settings = keep_game_settings;
             game.fixed_dt = fixed_dt;
+            game.viewport_rect = viewport_rect;
+            game.device = device;
             game.start_play(mode, worker_host, false, live_ids);
         }) {
             Ok(worker) => worker,

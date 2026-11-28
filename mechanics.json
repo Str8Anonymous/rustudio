@@ -2280,6 +2280,19 @@
    "group": "terrain",
    "value": "surfaces over the camera only (normal y >= 0.5, seen from below)",
    "source": "offline Studio: terrain Place A (surface drawn) and Place B F4 (no water walls)"
+  },
+  {
+   "name": "device simulator fit padding",
+   "group": "device simulator",
+   "value": 16,
+   "unit": "px",
+   "estimated": true
+  },
+  {
+   "name": "device simulator screen size rounding",
+   "group": "device simulator",
+   "value": "floor(floor(points × scale) / scale)",
+   "source": "Roblox Studio's Device Simulator, measured: iPhone 14 844x390 reports 843x389 fitted in a 1914x718 panel"
   }
  ]
 }
